@@ -29,7 +29,14 @@ With a readout board plugged in over USB:
 uv run opentac flash                 # put the firmware on the board
 uv run opentac setup my_design.zip   # tell the board which sensor is attached (once)
 uv run opentac view                  # live heatmap
+uv run opentac record takes/         # write a take; `opentac replay takes/<folder>` plays it back
 ```
+
+`opentac record DIR` writes each take as a folder of `tactile.npz`, `manifest.json` and
+`take.json`. `opentac replay` opens that folder in the same heatmap as `opentac view`, with
+no board attached: `--snapshot out.png` draws one frame (the strongest taxel, or `--frame N`)
+and exits; without `--snapshot` the window plays the take, pause with space, step with the
+arrow keys.
 
 A new board has no firmware yet: hold its BOOT0 button while plugging it in, then run
 `uv run opentac flash --board readout60` (or `node16` for the 30-pin pair). See

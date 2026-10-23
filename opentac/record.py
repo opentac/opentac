@@ -5,6 +5,8 @@
 
     path = record(Sensor(), "recordings", seconds=5, description="tape roll, edge-on")
     take = load_take(path)          # {"manifest", "info", plus every array}
+    frames = list(iter_frames(path))  # same Frame objects a live board yields
+    # opentac replay recordings/<take>   plays it in the heatmap viewer
 
 A take is a folder named <date>_<time>_<slug> holding three files (format
 "opentac_view_take/1"):
@@ -191,7 +193,12 @@ def record(sensor, outdir, seconds=None, description="", log=print) -> Path | No
 def load_take(path) -> dict:
     """A take folder as {"manifest": Manifest, "info": take.json dict, <npz arrays>...}."""
     path = Path(path)
-    info = json.loads((path / "take.json").read_text(encoding="utf-8"))
+    if not path.is_dir():
+        raise ValueError(f"{path} is not a take folder")
+    info_path = path / "take.json"
+    if not info_path.exists():
+        raise ValueError(f"{path} is not a {TAKE_FORMAT} take (no take.json)")
+    info = json.loads(info_path.read_text(encoding="utf-8"))
     if info.get("format") != TAKE_FORMAT:
         raise ValueError(f"{path} is not a {TAKE_FORMAT} take (format {info.get('format')!r})")
     with np.load(path / "tactile.npz") as npz:
@@ -199,3 +206,59 @@ def load_take(path) -> dict:
     out["manifest"] = manifest_mod.load(path / "manifest.json")
     out["info"] = info
     return out
+
+
+_MODE_FROM_NAME = {"raster": 0, "xamp_fixed": 1, "xamp_grow": 2}
+
+
+def iter_frames(path):
+    """Yield one `opentac.frame.Frame` per stored sample, in recording order.
+
+    Unread taxels (xampling, or a stored -1) come back as NaN with `mask` False,
+    the same way a live board reports them. Board bookkeeping (`index`,
+    `generation`, `mode`, `dt_us`, `dropped`) is restored when the npz has it.
+    """
+    from opentac.device.protocol import BoardFrame
+
+    take = load_take(path)
+    raw = take["raw"]
+    t = np.asarray(take["t_host"], dtype=float)
+    n = len(t)
+    sampled = take.get("sampled")
+    frame_id = take.get("frame_id", np.arange(n))
+    generation = take.get("generation", np.zeros(n, dtype=int))
+    dt_us = take.get("dt_us", np.zeros(n, dtype=int))
+    dropped = take.get("dropped", np.zeros(n, dtype=int))
+    accel, gyro = take.get("accel"), take.get("gyro")
+    quat, euler = take.get("quat"), take.get("euler")
+    mode_name = (take["info"].get("settings") or {}).get("mode", "raster")
+    mode = _MODE_FROM_NAME.get(mode_name, 0)
+    units = "counts above zero" if mode else "counts"
+    for i in range(n):
+        values = np.asarray(raw[i], dtype=float)
+        mask = np.asarray(sampled[i], dtype=bool) if sampled is not None else (values >= 0)
+        taxels = np.where(mask, values, np.nan)
+        imu = {}
+        if accel is not None:
+            imu = dict(accel_mg=accel[i].tolist(), gyro_mdps=gyro[i].tolist(),
+                       quat_wxyz=quat[i].tolist(), euler_deg=euler[i].tolist())
+        yield BoardFrame(
+            taxels=taxels, t=float(t[i]), mask=mask, imu=imu, units=units,
+            index=int(frame_id[i]), generation=int(generation[i]),
+            mode=int(mode), dt_us=int(dt_us[i]), dropped=int(dropped[i]))
+
+
+def peak_frame_index(path) -> int:
+    """Index of the frame whose strongest taxel is the take's strongest taxel."""
+    take = load_take(path)
+    raw = np.asarray(take["raw"], dtype=float)
+    sampled = take.get("sampled")
+    if sampled is not None:
+        shown = np.where(sampled, raw, np.nan)
+    else:
+        shown = np.where(raw >= 0, raw, np.nan)
+    peaks = np.nanmax(shown, axis=1)
+    peaks = np.where(np.isfinite(peaks), peaks, -np.inf)
+    if not np.isfinite(peaks).any():
+        return 0
+    return int(np.nanargmax(peaks))

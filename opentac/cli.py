@@ -224,6 +224,13 @@ def _record(args) -> int:
     return 0
 
 
+def _replay(args) -> int:
+    from opentac.view import replay
+
+    return replay(args.take, shear=args.shear, vmax=args.vmax, snapshot=args.snapshot,
+                  frame=args.frame, speed=args.speed)
+
+
 def _flash(args) -> int:
     from opentac.device.flash import flash
 
@@ -327,6 +334,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seconds", type=float, help="stop after this long")
     p.add_argument("--description", default="", help="free text stored with the take")
     p.set_defaults(func=_record)
+
+    p = sub.add_parser("replay", help="play a recorded take in the heatmap viewer (no board)")
+    p.add_argument("take", help="take folder written by `opentac record` or `opentac view --save`")
+    p.add_argument("--shear", action="store_true", help="start with shear arrows on (key s)")
+    p.add_argument("--vmax", type=float, default=4095, help="top of the colour scale, counts")
+    p.add_argument("--snapshot", metavar="PNG", help="save one frame to a PNG and exit")
+    p.add_argument("--frame", type=int, metavar="N",
+                   help="with --snapshot: 0-based frame to draw (default: the strongest)")
+    p.add_argument("--speed", type=float, default=1.0,
+                   help="playback speed against the recorded timestamps (1 is realtime)")
+    p.set_defaults(func=_replay)
 
     p = sub.add_parser("flash", help="put the prebuilt firmware on the board over USB (a new "
                        "board: hold BOOT0 while plugging it in, and pass --board)")

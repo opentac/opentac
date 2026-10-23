@@ -3,8 +3,9 @@
     opentac view                 the board on USB, or every node of a bus controller
     opentac view --shear         with one shear arrow per bump
     opentac view --save takes/   Enter starts and stops a take
+    opentac replay TAKE          play a recorded take in the same heatmap
 
-Keys (click the window first):
+Keys on a live view (click the window first):
     b      zero: subtract the mean of the last frames (nothing touching). With
            xampling, the board measures a new zero instead.
     c      clear the zero
@@ -12,6 +13,12 @@ Keys (click the window first):
     s      shear arrows and bump boxes on/off (skins with shear bumps)
     Enter  start / stop a take (with --save)
     q      quit
+
+Keys on a replay:
+    space  pause / continue
+    left / right   step one frame
+    home / end     first / last frame
+    a, s, q        as on a live view
 
 Frames arrive in the manifest's `pixels` order, so value k is drawn at pixels[k]
 with no reshaping. Xampling frames carry only the taxels read this frame; the
@@ -21,12 +28,13 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
 from opentac import manifest as manifest_mod
 from opentac.device.config import derive_pitch_um
-from opentac.record import Take, session
+from opentac.record import Take, iter_frames, load_take, peak_frame_index, session
 
 BASELINE_FRAMES = 30
 UNSAMPLED_COLOR = "#3a6ea5"
@@ -234,6 +242,17 @@ class Reader(threading.Thread):
         self.join(timeout=2.0)
 
 
+def _use_matplotlib(snapshot):
+    """Agg for a PNG snapshot so a machine with no display can still draw."""
+    import matplotlib
+    if snapshot:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    for name, key in (("keymap.save", "s"), ("keymap.back", "c")):
+        matplotlib.rcParams[name] = [k for k in matplotlib.rcParams[name] if k != key]
+    return matplotlib, plt
+
+
 def view(sensors, bus=None, shear=False, vmax=4095.0, save=None, description="",
          snapshot=None, log=print) -> int:
     """Show live heatmaps of `sensors` (Sensor objects holding skins with cached manifests).
@@ -241,16 +260,7 @@ def view(sensors, bus=None, shear=False, vmax=4095.0, save=None, description="",
     Pass `bus` when the sensors are nodes of one Bus. `save` is a folder for
     takes (Enter starts and stops one). `snapshot` saves one frame to a PNG and returns.
     """
-    import matplotlib
-    if snapshot:
-        matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    # 's' and 'c' are the viewer's shear and clear keys; matplotlib also binds
-    # them by default to save and back, which would open a save dialog or step
-    # the view back. Release them before the figure is made.
-    for name, key in (("keymap.save", "s"), ("keymap.back", "c")):
-        matplotlib.rcParams[name] = [k for k in matplotlib.rcParams[name] if k != key]
+    _, plt = _use_matplotlib(snapshot)
 
     sensors = [s for s in sensors if s.manifest is not None]
     if not sensors:
@@ -381,4 +391,106 @@ def view(sensors, bus=None, shear=False, vmax=4095.0, save=None, description="",
         plt.show()
     finally:
         on_close()
+    return 0
+
+
+def _replay_interval_ms(frames, speed):
+    """Animation step in ms, from the take's own timestamps, scaled by `speed`."""
+    if len(frames) < 2 or speed <= 0:
+        return 33
+    span = float(frames[-1].t - frames[0].t)
+    if span <= 0:
+        return 33
+    dt = 1000.0 * span / (len(frames) - 1) / speed
+    return max(1, min(200, int(round(dt))))
+
+
+def replay(path, shear=False, vmax=4095.0, snapshot=None, frame=None, speed=1.0,
+           log=print) -> int:
+    """Play a recorded take in the same heatmap as `view`.
+
+    `path` is a take folder (`tactile.npz`, `manifest.json`, `take.json`).
+    `snapshot` draws one frame to a PNG and returns: `frame` selects it
+    (0-based); the default is the frame with the strongest taxel. `speed` is
+    playback against the recorded timestamps (1 is realtime).
+    """
+    if speed <= 0:
+        raise ValueError(f"speed must be positive, got {speed}")
+    take = load_take(path)
+    frames = list(iter_frames(path))
+    if not frames:
+        raise ValueError(f"{path} holds no frames")
+    n = len(frames)
+    info = take["info"]
+    name = info.get("take") or Path(path).name
+    fps = info.get("fps")
+    log(f"{name}: {n} frames, {take['manifest'].n} taxels"
+        + (f", {fps:.0f} fps" if fps else ""))
+
+    _, plt = _use_matplotlib(snapshot)
+    fig, ax = plt.subplots(figsize=(6, 6.5))
+    panel = Panel(ax, take["manifest"], name, vmax, shear)
+
+    def note_for(i):
+        fr = frames[i]
+        peak = float(np.nanmax(fr.taxels, initial=0))
+        line = f"{i + 1}/{n}  t={fr.t - frames[0].t:6.3f} s  peak {peak:4.0f}"
+        if not fr.mask.all():
+            line += f"  read {int(fr.mask.sum())}/{len(fr.taxels)}"
+        return line
+
+    if snapshot:
+        i = peak_frame_index(path) if frame is None else frame
+        if i < 0 or i >= n:
+            raise ValueError(f"frame {i} is outside 0..{n - 1}")
+        panel.draw(frames[i].taxels, note=note_for(i))
+        fig.savefig(snapshot, dpi=120, bbox_inches="tight")
+        log(f"saved {snapshot} (frame {i})")
+        plt.close(fig)
+        return 0
+
+    state = {"i": 0, "paused": False, "autoscale": False}
+    panel.draw(frames[0].taxels, note=note_for(0))
+
+    def on_key(event):
+        key = event.key
+        if key == " ":
+            state["paused"] = not state["paused"]
+        elif key in ("left", "right", "home", "end"):
+            state["paused"] = True
+            if key == "left":
+                state["i"] = max(0, state["i"] - 1)
+            elif key == "right":
+                state["i"] = min(n - 1, state["i"] + 1)
+            elif key == "home":
+                state["i"] = 0
+            else:
+                state["i"] = n - 1
+            panel.draw(frames[state["i"]].taxels, state["autoscale"], note_for(state["i"]))
+            fig.canvas.draw_idle()
+        elif key == "a":
+            state["autoscale"] = not state["autoscale"]
+            panel.draw(frames[state["i"]].taxels, state["autoscale"], note_for(state["i"]))
+            fig.canvas.draw_idle()
+        elif key == "s":
+            panel.show_shear(not panel.shear_on)
+            panel.draw(frames[state["i"]].taxels, state["autoscale"], note_for(state["i"]))
+            fig.canvas.draw_idle()
+
+    def update(_):
+        if not state["paused"] and state["i"] < n - 1:
+            state["i"] += 1
+        elif not state["paused"] and state["i"] >= n - 1:
+            state["paused"] = True
+        i = state["i"]
+        extra = "  PAUSED" if state["paused"] else ""
+        panel.draw(frames[i].taxels, state["autoscale"], note_for(i) + extra)
+        return []
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    from matplotlib.animation import FuncAnimation
+    anim = FuncAnimation(fig, update, interval=_replay_interval_ms(frames, speed),
+                         cache_frame_data=False)  # noqa: F841
+    log("keys: space pause, left/right step, home/end, a autoscale, s shear, q quit")
+    plt.show()
     return 0
