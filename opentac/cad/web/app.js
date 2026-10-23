@@ -1,7 +1,7 @@
 // PCB generation UI: outline editor + parameters + POST /generate + SVG/zip.
 // The outline can come from hand-drawing, a selected STL face (stl-viewer.js),
-// or a DXF import (dxf-import.js). A second, optional polygon (the "sensorize
-// zone") constrains where sensors get packed inside the outline.
+// or a DXF / SVG import (dxf-import.js). A second, optional polygon (the
+// "sensorize zone") constrains where sensors get packed inside the outline.
 import { API_BASE } from "./config.js";
 import { clearPrinted, designStem, downloadName, markPrinted, zipName } from "./design-name.js";
 import { createRouteEditor } from "./route-editor.js";
@@ -22,7 +22,7 @@ let foldLines = [];
 // connector on an interior chord the user never intended, leaving few or no
 // sensors routable. Drawing or reshaping the outline clears this; pressing
 // "Set cable edge" sets it. Presets and restored designs carry a designed
-// cable edge and count as set; STL unfolds and DXF imports do not. Generate
+// cable edge and count as set; STL unfolds and DXF/SVG imports do not. Generate
 // refuses to run while unset.
 let cableEdgeConfirmed = false;
 let selected = null;
@@ -1056,8 +1056,8 @@ window.addEventListener("otc:face-clear", () => {
   updateCadButtons();
 });
 
-// Outline delivered from a DXF import (dxf-import.js). Always targets the
-// board outline, same convention as the STL handoff above.
+// Outline delivered from a DXF or SVG import (dxf-import.js). Always targets
+// the board outline, same convention as the STL handoff above.
 window.addEventListener("otc:dxf-outline", (e) => {
   if (!confirmOverwrite(vertices.length, "board outline")) return;
   pushUndo();
@@ -1065,19 +1065,20 @@ window.addEventListener("otc:dxf-outline", (e) => {
   updateTargetButtons();
   vertices = e.detail.outline.map((p) => [p[0], p[1]]);
   foldLines = [];
-  // A DXF loop's first edge is an accident of the file's vertex order, so
+  // A DXF/SVG loop's first edge is an accident of the file's vertex order, so
   // the user must confirm the cable edge before Generate runs.
   cableEdgeConfirmed = false;
   selected = null;
   angleReferenceEdge = null;
   fitViewTo(vertices);
   redraw();
-  setOutlineInfo("from DXF · confirm the cable edge below");
+  const src = e.detail.source === "svg" ? "SVG" : "DXF";
+  setOutlineInfo(`from ${src} · confirm the cable edge below`);
   syncDimensionFields();
   updateCadButtons();
   genStatus.textContent = (e.detail.warnings && e.detail.warnings.length)
-    ? `DXF imported with warnings: ${e.detail.warnings.join(" ")}`
-    : "DXF outline loaded — press Generate PCB.";
+    ? `${src} imported with warnings: ${e.detail.warnings.join(" ")}`
+    : `${src} outline loaded — press Generate PCB.`;
   showCableEdgeBanner();
 });
 

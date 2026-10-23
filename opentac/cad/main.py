@@ -79,6 +79,7 @@ from opentac.cad.export.connector_geometry import (
 )
 from opentac.cad.export.svg_preview import generate_svg
 from opentac.cad.importers.dxf import parse_dxf_outline, DxfImportError
+from opentac.cad.importers.svg import parse_svg_outline, SvgImportError
 
 app = FastAPI(title="OpenTac-CAD API", version="0.1.0")
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ _UNROUTED_MSG = (
     "Enlarge the outline, coarsen the pitch, or switch to grow-board mode.")
 
 MAX_DXF_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_SVG_UPLOAD_BYTES = MAX_DXF_UPLOAD_BYTES
 # Upload limit for the STL endpoints (/unroll-mesh, /grow-region,
 # /unroll-mesh-chain).
 MAX_STL_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -462,6 +464,25 @@ async def import_dxf(file: UploadFile = File(...)):
     try:
         result = parse_dxf_outline(content)
     except DxfImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return DxfImportResponse(
+        loops=result.loops,
+        areas=result.areas,
+        chosen_index=result.chosen_index,
+        warnings=result.warnings,
+    )
+
+
+@app.post("/import-svg", response_model=DxfImportResponse)
+async def import_svg(file: UploadFile = File(...)):
+    content = await file.read()
+    if len(content) > MAX_SVG_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="SVG file too large (10MB limit).")
+
+    try:
+        result = parse_svg_outline(content)
+    except SvgImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return DxfImportResponse(

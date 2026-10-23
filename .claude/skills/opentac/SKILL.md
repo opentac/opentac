@@ -1,6 +1,6 @@
 ---
 name: opentac
-description: Design a tactile sensor PCB from a plain-English description — "a sensor shaped like a size 9 insole with the cable at the heel". Builds and validates the outline, runs the OpenTac-CAD pipeline locally, and returns KiCad files and Gerbers. Use for any tactile sensor, taxel array, pressure-sensing PCB, or sensor built from a described shape, a DXF outline, or a surface of an STL part.
+description: Design a tactile sensor PCB from a plain-English description — "a sensor shaped like a size 9 insole with the cable at the heel". Builds and validates the outline, runs the OpenTac-CAD pipeline locally, and returns KiCad files and Gerbers. Use for any tactile sensor, taxel array, pressure-sensing PCB, or sensor built from a described shape, a DXF or SVG outline, or a surface of an STL part.
 ---
 
 # OpenTac-CAD
@@ -32,11 +32,15 @@ fixed-outline retry loop and the post-route smoothing; calling
 
 ## The flow
 
-1. **Get the outline.** Three sources:
+1. **Get the outline.** Four sources:
    - *Described shape* — research the real dimensions (below), then build it
      with `helpers/outline.py`.
    - *DXF* — `importers.dxf.parse_dxf_outline()`. If they have real CAD, use
      it; it is more accurate than anything constructed from a description.
+   - *SVG* — `importers.svg.parse_svg_outline()`. Closed paths, polygons,
+     rectangles, circles and ellipses, scaled from the file's `width` /
+     `viewBox` into millimetres. Prefer this when the outline comes from a
+     drawing app rather than a CAD export.
    - *STL surface* — `helpers/mesh.py` enumerates the part's flat surfaces,
      scores each for how well it flattens, and unrolls the chosen one. No
      clicking and no browser required.
@@ -84,7 +88,7 @@ interpolation between hand-placed control points leaves visible faceting, and
 already has real straight edges: a spline through the 8 vertices of a face
 unrolled from an STL overshoots its corners and grows the board from 28x79mm to
 51x83mm. `resample_closed()` guards against this by falling back to linear
-whenever the curve leaves the source outline's envelope, so DXF and STL
+whenever the curve leaves the source outline's envelope, so DXF, SVG and STL
 outlines pass through unharmed — but pass `smooth=False` when you know the
 shape is polygonal.
 

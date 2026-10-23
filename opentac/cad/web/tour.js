@@ -15,7 +15,7 @@ const BASE_STEPS = [
     view: "landing",
     selector: ".landing-modes",
     title: "Pick how to start",
-    body: "Every design begins with a shape, three ways to get one: draw it by hand, import a DXF, or upload an STL of the actual part and unfold its surface at true scale. This tour continues with Draw mode as the example — pick DXF or STL from this screen instead to see those steps, or switch modes anytime with the switcher inside the tool.",
+    body: "Every design begins with a shape: draw it by hand, import a DXF or SVG, or upload an STL of the actual part and unfold its surface at true scale. This tour continues with Draw mode as the example — pick DXF / SVG or STL from this screen instead to see those steps, or switch modes anytime with the switcher inside the tool.",
   },
 ];
 
@@ -23,8 +23,8 @@ function modeStep(mode) {
   if (mode === "dxf") {
     return [{
       view: "tool", mode: "dxf", selector: "#dxf-import-group",
-      title: "Mode: Import a DXF",
-      body: "This is what \"Import a DXF\" from the start screen opens. Upload a closed 2D outline. We pick the largest closed shape automatically and scale it to millimeters using the file's units. Since an imported shape has no inherent cable edge, confirm or change it afterward with Set cable edge.",
+      title: "Mode: Import a DXF or SVG",
+      body: "This is what \"Import a DXF or SVG\" from the start screen opens. Upload a closed 2D outline as .dxf or .svg. We pick the largest closed shape automatically and scale it to millimetres using the file's units. Since an imported shape has no inherent cable edge, confirm or change it afterward with Set cable edge.",
     }];
   }
   if (mode === "stl") {
