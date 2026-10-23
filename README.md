@@ -135,7 +135,8 @@ problem.
 
 ## Citing
 
-See [CITATION.cff](CITATION.cff) and the [paper page](https://opentac.github.io/paper/).
+The paper is on arXiv: [arXiv:2610.31661](https://arxiv.org/abs/2610.31661). See
+[CITATION.cff](CITATION.cff) and the [paper page](https://opentac.github.io/paper/) for the citation.
 
 ## License
 
