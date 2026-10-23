@@ -31,6 +31,7 @@ same Y-up frame, so a sign flip fails it with or without KiCad.
 import base64
 import io
 import json
+import re
 import shutil
 import zipfile
 
@@ -217,6 +218,12 @@ def test_builtin_writer_orientation(name, monkeypatch):
                        fp["edge_clear"], fp["via_dia"])
     taxels = np.array([p[:2] for p in man["pixels"]], dtype=float)
     vias = taxels + [g.via_x, -g.via_y]          # footprint frame is Y-down
+    # plus the connector's transition vias (export/connector_contacts.py),
+    # through vias on every copper layer, as the board file places them
+    pcb = z.read("board.kicad_pcb").decode()
+    transition = [(float(x), -float(y)) for x, y in re.findall(r"^  \(via \(at (-?[\d.]+) (-?[\d.]+)\)", pcb, re.M)]
+    assert transition, "no transition vias"
+    vias = np.vstack([vias, transition])
     drill = excellon_hits(z.read("gerber/board.drl").decode())
     assert _same_points([h[1:] for h in drill if abs(h[0] - fp["via_drill"]) < 1e-6], vias)
     top = z.read("gerber/board-F_Cu.gtl").decode()

@@ -28,6 +28,7 @@ from opentac.cad.export.connector_geometry import (
 )
 from opentac.cad.export.silk_label import label_strokes, silk_label
 from opentac.cad.export.silk_backmark import backmark
+from opentac.cad.export.connector_contacts import with_drilled
 from opentac.cad.export.coverlay import connector_mask_opening, taxel_opening_for
 
 
@@ -115,6 +116,8 @@ def generate_gerbers(
     params: Params,
     connector_dir: str = "",
     manifest_json: str | None = None,
+    transition_vias=(),
+    drilled_pads=(),
 ) -> dict[str, str]:
     """Generate all Gerber layer files. Returns {filename: content}.
 
@@ -131,18 +134,19 @@ def generate_gerbers(
     g = pixel_geometry(params.pixel_w_mm, params.pixel_h_mm, params.trace_w_mm,
                        params.gap_mm, params.center_clear_mm, params.edge_clear_mm,
                        params.via_dia_mm)
-    connector_pads = connector_pad_geometries(layout, outline_xy, params, connector_dir)
+    connector_pads = with_drilled(connector_pad_geometries(layout, outline_xy, params, connector_dir),
+                                  drilled_pads, params)
 
     # F.Cu — front copper
     files["board-F_Cu.gtl"] = _generate_copper_layer(
         "F.Cu", col_routes, layout, active_pix, Pxy, g, params, is_front=True,
-        connector_pads=connector_pads)
+        connector_pads=connector_pads, transition_vias=transition_vias)
 
     # B.Cu — back copper (the row wires that are not on an inner layer)
     bcu_routes = [r for r in row_routes if (getattr(r, "layer", None) or "B.Cu") == "B.Cu"]
     files["board-B_Cu.gbl"] = _generate_copper_layer(
         "B.Cu", bcu_routes, layout, active_pix, Pxy, g, params, is_front=False,
-        connector_pads=connector_pads)
+        connector_pads=connector_pads, transition_vias=transition_vias)
 
     # In1.Cu / In2.Cu — a 4-layer board's inner row wiring, with every
     # through-hole pad (taxel vias, connector pins) as KiCad plots them
@@ -152,7 +156,7 @@ def generate_gerbers(
             files[fname] = _generate_copper_layer(
                 layer, [r for r in row_routes if getattr(r, "layer", None) == layer],
                 layout, active_pix, Pxy, g, params, is_front=False,
-                connector_pads=connector_pads, buses=False)
+                connector_pads=connector_pads, buses=False, transition_vias=transition_vias)
 
     # Edge.Cuts — board outline + connector body
     files["board-Edge_Cuts.gm1"] = _generate_edge_cuts(layout, outline_xy, params, connector_dir)
@@ -186,9 +190,11 @@ def generate_gerbers(
 
 
 def _generate_copper_layer(layer_name, routes, layout, active_pix, Pxy, g, params, is_front, connector_pads=None,
-                           buses=True):
+                           buses=True, transition_vias=()):
     """Generate copper layer Gerber. buses=False (inner layers): no row or
-    column bus lines, only pads, vias and the given routes."""
+    column bus lines, only pads, vias and the given routes. transition_vias
+    (export/connector_contacts.py) are through vias, plotted on every copper
+    layer as KiCad plots them."""
     lines = []
     _write_header(lines, layer_name)
 
@@ -208,8 +214,10 @@ def _generate_copper_layer(layer_name, routes, layout, active_pix, Pxy, g, param
     lines.append(f"D{via_ap}*")
     for k in active_pix:
         _flash(lines, *_taxel_point(Pxy[k][0], Pxy[k][1], g.via_x, g.via_y))
+    for via in transition_vias or ():
+        _flash(lines, float(via.xy[0]), float(via.xy[1]))
 
-    # Connector pad copper, including through-hole rectangular terminals.
+    # Connector pad copper: the gold fingers, on the contact face's copper only.
     # Each connector pad is drawn as its exact footprint rectangle, as a region.
     _flash_connector_pads(lines, am, connector_pads or [], layer_name)
 

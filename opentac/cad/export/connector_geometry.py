@@ -6,6 +6,7 @@ import numpy as np
 from shapely.geometry import LineString, Point as ShapelyPoint, Polygon as ShapelyPolygon
 from shapely.ops import polygonize, unary_union
 
+from opentac.cad.export.connector_contacts import contact_pads, stiffener_note
 from opentac.cad.pipeline.tail_extension import tail_extension_from_layout
 from opentac.cad.pipeline.geometry import tail_geometry
 
@@ -327,13 +328,17 @@ def connector_geometries(layout, outline_xy, params, connector_dir):
     t_hat, n_out, pad1_route_world = connector_pose(layout, outline_xy, params)
     pad_anchor_y = _tail_side_pad_edge_y(text)
     pad1_world = pad1_route_world + pad_anchor_y * n_out
+    # The footprints draw each finger as a drilled through-hole pad on every
+    # copper layer; the export makes them plain pads on the contact face only,
+    # and words the stiffener note for that face (export/connector_contacts.py).
     return {
-        "pads": _resolve_pads(text, t_hat, n_out, pad1_world),
+        "pads": contact_pads(_resolve_pads(text, t_hat, n_out, pad1_world), params),
         "edge_lines": _resolve_edge_lines(text, t_hat, n_out, pad1_world),
         "edge_arcs": _resolve_edge_arcs(text, t_hat, n_out, pad1_world),
         "user_lines": _resolve_user_lines(text, t_hat, n_out, pad1_world),
         "user_arcs": _resolve_user_arcs(text, t_hat, n_out, pad1_world),
-        "user_texts": _resolve_user_texts(text, t_hat, n_out, pad1_world),
+        "user_texts": [{**item, "text": stiffener_note(item["text"], params)}
+                       for item in _resolve_user_texts(text, t_hat, n_out, pad1_world)],
         "t_hat": np.array(t_hat, dtype=float),
         "n_out": np.array(n_out, dtype=float),
         "pad1_route_world": pad1_route_world,

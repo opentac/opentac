@@ -46,6 +46,14 @@ class Params:
     #       so the field needs no wiring band for rows. See
     #       pipeline/route_4layer.py.
     copper_layers: int = 2
+    # Which face of the tail the connector's gold fingers are on: "bottom" (the
+    # default) or "top" (the taxel side). The face that has to meet the
+    # connector's contacts depends on the connector and on how the sensor is
+    # mounted, so it is the user's choice. The stiffener goes on the other face. An export-time choice: it
+    # changes no taxel or route, only the fingers' copper and mask and the
+    # vias that bring the other layers' wires to the contact face
+    # (export/connector_contacts.py).
+    contact_side: str = "bottom"
     preserve_sensors: bool = True
     auto_expand_board: bool = True
     routing_margin_mm: float = 3.0

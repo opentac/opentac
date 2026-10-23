@@ -19,11 +19,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import nearest_points, unary_union
 
 from opentac.cad.pipeline.types import Params, drop_removed_params
-from opentac.cad.pipeline.types import Layout, Route
+from opentac.cad.pipeline.types import DrcViolation, Layout, Route
 from opentac.cad.pipeline.geometry import (
     rotate_for_cable, remove_collinear_closed, tail_geometry, tail_offset_mm,
     connector_dimensions, CONNECTOR_BODY_BELOW_MM,
@@ -72,9 +72,10 @@ from opentac.cad.export.silk_backmark import backmark
 from opentac.cad.export.velostat import velostat_polygon, velostat_dxf, velostat_fold_pdf
 from opentac.cad.export.gerber import generate_gerbers
 from opentac.cad.export.excellon import generate_drill_file
+from opentac.cad.export.connector_contacts import CONTACT_SIDES, contact_transitions
 from opentac.cad.export.connector_geometry import (
     clip_beside_tab, connector_edge_geometries, connector_export_dir, connector_open_edge_endpoints,
-    connector_opening, connector_pad_geometries,
+    connector_geometries, connector_opening, connector_pad_geometries,
 )
 from opentac.cad.export.svg_preview import generate_svg
 from opentac.cad.importers.dxf import parse_dxf_outline, DxfImportError
@@ -237,6 +238,15 @@ class GenerateRequest(BaseModel):
                     "taxels and traces are the same either way. False: as wide as the "
                     "connector. A tail_width_mm or tail side padding wins over both, and a "
                     "cable shorter than about 5.5 mm keeps the connector's width.")
+    contact_side: str = Field(
+        "bottom",
+        description='Which face of the tail carries the connector\'s gold fingers: "bottom" '
+                    '(default) or "top" (the taxel side). The face that has to meet the connector\'s '
+                    "contacts depends on the connector and on how the sensor is mounted relative to "
+                    "it. The PI stiffener goes on the other face. The fingers are plain pads "
+                    "on that face's copper only, with no drill; wires on another copper layer "
+                    "cross to it through vias in the tail, before the stiffener. Changes no taxel "
+                    "or route.")
     readout_board: str = Field(
         "auto",
         description='Which OpenTac readout board the sensor plugs into. "auto" uses the '
@@ -473,7 +483,7 @@ def _merge_param_overrides(edit_data: dict, overrides: dict | None) -> dict:
         return edit_data
     # copper_layers is a routing decision: changing it means re-routing, so
     # it is not something a re-export of existing routes can override
-    allowed = set(_params_to_dict(Params()).keys()) - {"copper_layers", "cable_length_auto"}
+    allowed = (set(_params_to_dict(Params()).keys()) | {"contact_side"}) - {"copper_layers", "cable_length_auto"}
     clean = {k: v for k, v in overrides.items() if k in allowed}
     # A blank Tail length field is "automatic": the stored edit_data already
     # carries the length chosen for this board, and its routes end at it.
@@ -1588,6 +1598,17 @@ def _clip_board_to_connector_tab(layout: Layout, outline_xy: np.ndarray, params:
     return True
 
 
+CONTACT_VIOLATION_TYPES = ("transition via", "via clearance", "via edge")
+
+
+def _routing_violations(drc: dict) -> int:
+    """DRC violations that bear on the routing: all of them except those of the
+    connector's transition vias, which depend only on the contact side and are
+    made at export time. generate() compares routing attempts by this count, so
+    either contact side gets the same taxels and routes."""
+    return int(drc["violations"]) - int(drc.get("contact_violations", 0))
+
+
 def _outputs_with_connector_tail(
     layout: Layout,
     outline_xy: np.ndarray,
@@ -1660,10 +1681,30 @@ def _build_outputs(
     active_connector_dir = connector_export_dir(layout, raw_connector_dir)
     connector_export_enabled = bool(active_connector_dir)
 
+    # The connector's fingers are on one face of the tail (contact_side); a
+    # wire on another copper layer crosses to that face through a via in the
+    # tail. Made on copies, for the DRC and both board writers alike: the
+    # routes the caller holds (edit_data, the route editor) keep their layers.
+    active_xy = np.asarray(layout.placements_xy, dtype=float)[
+        sorted(set(range(len(layout.placements_xy))) - set(removed))]
+    contacts = contact_transitions(
+        connector_geometries(layout, outline_xy, params, active_connector_dir)
+        if active_connector_dir else None,
+        params, col_routes, row_routes, board_poly=layout.board_poly,
+        field_boxes=[box(x - params.pitch_x_mm / 2, y - params.pitch_y_mm / 2,
+                         x + params.pitch_x_mm / 2, y + params.pitch_y_mm / 2) for x, y in active_xy])
+    cu_col, cu_row = contacts.col_routes, contacts.row_routes
+
     violations = drc_check(
-        col_routes, row_routes, params.trace_w_mm, params.clearance_mm,
+        cu_col, cu_row, params.trace_w_mm, params.clearance_mm,
         outline_xy, params.board_edge_clear_mm, layout.board_poly,
-        taxels=TaxelCopper.of(layout, removed, params))
+        taxels=TaxelCopper.of(layout, removed, params), vias=contacts.vias)
+    for problem in contacts.problems:
+        xy = np.asarray(problem["xy"], dtype=float)
+        violations.append(DrcViolation(
+            layer=problem["layer"], net1=problem["net"], net2=f"pad {problem['pad']}",
+            type="transition via", seg1=np.array([xy, xy]), seg2=np.array([xy, xy]),
+            distance=0.0, min_required=0.0))
     violations = _drop_connector_zone_edge_flags(
         violations, layout, outline_xy, params, active_connector_dir)
     # The board outline and the connector footprint's Edge.Cuts, as exported,
@@ -1679,8 +1720,9 @@ def _build_outputs(
         params, active_connector_dir, fill_xy)
 
     pcb_text = generate_kicad_pcb(
-        layout, outline_xy, col_routes, row_routes, removed, params,
-        active_connector_dir, manifest_json=manifest_json)
+        layout, outline_xy, cu_col, cu_row, removed, params,
+        active_connector_dir, manifest_json=manifest_json, transition_vias=contacts.vias,
+        drilled_pads=contacts.drilled_pads)
 
     # Every taxel's one top mask opening, as the board and Gerbers draw it
     # (export/coverlay.py); a dense board's is trimmed into the electrodes.
@@ -1702,9 +1744,11 @@ def _build_outputs(
         pcb_text, copper_layers_of(params, row_routes))
     if gerber_files is None or drill_text is None:
         gerber_files = generate_gerbers(
-            layout, outline_xy, col_routes, row_routes, removed, params,
-            active_connector_dir, manifest_json=manifest_json)
-        drill_text = generate_drill_file(layout, removed, params, outline_xy, active_connector_dir)
+            layout, outline_xy, cu_col, cu_row, removed, params,
+            active_connector_dir, manifest_json=manifest_json, transition_vias=contacts.vias,
+            drilled_pads=contacts.drilled_pads)
+        drill_text = generate_drill_file(layout, removed, params, outline_xy, active_connector_dir,
+                                         transition_vias=contacts.vias, drilled_pads=contacts.drilled_pads)
         gerber_source = "direct"
     svg_text = generate_svg(layout, outline_xy, col_routes, row_routes, removed, params,
                             active_connector_dir)
@@ -1731,7 +1775,7 @@ def _build_outputs(
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("board.kicad_pcb", pcb_text)
-        for name, text in kicad_project_files(params).items():
+        for name, text in kicad_project_files(params, drilled_fingers=bool(contacts.drilled_pads)).items():
             zf.writestr(name, text)
         zf.writestr(f"{fp_name}.kicad_mod", fp_text)
         zf.writestr("manifest.json", manifest_json)
@@ -1837,6 +1881,10 @@ def _build_outputs(
     }
     drc = {
         "violations": len(violations) + len(incomplete_nets),
+        # The connector's transition vias (export/connector_contacts.py): part
+        # of "violations", and left out where generate() chooses between
+        # routing attempts, so the contact side never changes taxels or routes.
+        "contact_violations": sum(v.type in CONTACT_VIOLATION_TYPES for v in violations),
         "routing_problem_pixels": sorted(int(i) for i in routing_problem_pix),
         "routing_warning_nets": sorted(incomplete_nets),
         "details": [
@@ -1917,6 +1965,8 @@ def generate(req: GenerateRequest):
                 "connector in a bay. This routes poorly or not at all; move the "
                 "cable edge to an outermost edge of the shape for full routing.")
 
+        if req.contact_side not in CONTACT_SIDES:
+            raise ValueError(f'contact_side must be "bottom" or "top", got {req.contact_side!r}.')
         if req.copper_layers not in (2, 4):
             raise ValueError(f"copper_layers must be 2 or 4, got {req.copper_layers!r}.")
         if req.trace_w_mm + req.clearance_mm > req.pad_pitch_mm + 1e-9:
@@ -1959,6 +2009,7 @@ def generate(req: GenerateRequest):
             design_name=req.design_name,
             readout_board=req.readout_board,
             narrow_tail=req.narrow_tail,
+            contact_side=req.contact_side,
             copper_layers=req.copper_layers,
         )
         board_mode = _resolve_board_mode(req.board_mode, req.auto_expand_board)
@@ -2001,7 +2052,7 @@ def generate(req: GenerateRequest):
                     fallback = generate(req.model_copy(update={"router": "legacy"}))
                 except HTTPException:
                     fallback = None
-                if fallback is not None and fallback.drc["violations"] == 0:
+                if fallback is not None and _routing_violations(fallback.drc) == 0:
                     fallback.stats["router"] = "legacy"
                     fallback.stats["hug_fallback"] = True
                     fallback.stats["hug_plan_warnings"] = list(hug_plan.warnings)[:8]
@@ -2169,7 +2220,7 @@ def generate(req: GenerateRequest):
                                 fallback = None
                             # Clean by itself — not clean because escaping
                             # nets were pruned away (_prune_edge_escapes).
-                            if (fallback is not None and fallback.drc["violations"] == 0
+                            if (fallback is not None and _routing_violations(fallback.drc) == 0
                                     and not fallback.stats.get("dropped_by_edge_prune")):
                                 fallback.stats["router"] = "legacy"
                                 fallback.stats["hug_fallback"] = True
@@ -2363,7 +2414,7 @@ def generate(req: GenerateRequest):
         # branch below cannot fire a second time.
         if (board_mode == "fixed_keepout"
                 and req.wiring_keepout_floor_mm is None
-                and drc["violations"] > 0):
+                and _routing_violations(drc) > 0):
             safe_req = req.model_copy(update={
                 "wiring_keepout_floor_mm": max(0.0, float(req.routing_margin_mm))})
             # For the hug router the fallback exists to improve on the primary
@@ -2378,7 +2429,7 @@ def generate(req: GenerateRequest):
                     fallback = None
             else:
                 fallback = generate(safe_req)
-            if fallback is not None and fallback.drc["violations"] < drc["violations"]:
+            if fallback is not None and _routing_violations(fallback.drc) < _routing_violations(drc):
                 return fallback
 
         edit_data = _build_edit_data(

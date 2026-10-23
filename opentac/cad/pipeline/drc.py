@@ -16,6 +16,7 @@ def drc_check(
     board_edge_clear_mm: float = 0.0,
     board_poly=None,
     taxels=None,
+    vias=None,
 ) -> list[DrcViolation]:
     """Check same-layer route clearance and optional board-edge clearance.
 
@@ -24,7 +25,11 @@ def drc_check(
     merely overlaps in plan view.
 
     taxels (optional, a TaxelCopper) also checks the F.Cu wires against the
-    taxels' own copper — see _check_taxels."""
+    taxels' own copper — see _check_taxels.
+
+    vias (optional, the connector's transition vias, export/connector_contacts.py)
+    are through vias: each is checked against every other net's wires on every
+    layer, against the other vias, and against the board edge — see _check_vias."""
     G = trace_w_mm + clearance_mm
     violations = []
 
@@ -39,8 +44,70 @@ def drc_check(
         violations.extend(_check_board_edge(col_routes, outline_xy, edge_min, "F.Cu", board_poly))
         for layer, routes in _by_layer(row_routes, "B.Cu"):
             violations.extend(_check_board_edge(routes, outline_xy, edge_min, layer, board_poly))
+    if vias:
+        violations.extend(_check_vias(
+            vias, [*col_routes, *row_routes], trace_w_mm, clearance_mm,
+            outline_xy, board_edge_clear_mm, board_poly))
 
     return violations
+
+
+def _check_vias(vias, routes, trace_w_mm, clearance_mm, outline_xy=None,
+                board_edge_clear_mm=0.0, board_poly=None) -> list[DrcViolation]:
+    """Through vias (anything with .xy, .dia, .net_name) against the wires of
+    other nets on any layer, against each other, and against the board edge."""
+    out = []
+    # Every wire segment once, as arrays, so each via is one vectorised
+    # point-to-segment distance over the whole board.
+    seg_a, seg_b, seg_net, seg_layer = [], [], [], []
+    for route in routes:
+        if route.polyline_xy is None:
+            continue
+        P = np.asarray(route.polyline_xy, dtype=float)
+        if len(P) < 2:
+            continue
+        seg_a.append(P[:-1]); seg_b.append(P[1:])
+        seg_net += [route.net_name] * (len(P) - 1)
+        seg_layer += [getattr(route, "layer", None) or "via"] * (len(P) - 1)
+    A = np.vstack(seg_a) if seg_a else np.zeros((0, 2))
+    B = np.vstack(seg_b) if seg_b else np.zeros((0, 2))
+    nets = np.array(seg_net, dtype=object)
+    for i, v in enumerate(vias):
+        c = np.asarray(v.xy, dtype=float)
+        r = float(v.dia) / 2
+        need = r + trace_w_mm / 2 + clearance_mm
+        here = np.array([c, c])
+        if len(A):
+            d_ab = B - A
+            L2 = np.einsum("ij,ij->i", d_ab, d_ab)
+            t = np.clip(np.einsum("ij,ij->i", c - A, d_ab) / np.where(L2 > 0, L2, 1.0), 0.0, 1.0)
+            dist = np.linalg.norm(A + t[:, None] * d_ab - c, axis=1)
+            for k in np.flatnonzero((dist < need - 1e-6) & (nets != v.net_name)):
+                out.append(DrcViolation(
+                    layer=seg_layer[k], net1=v.net_name, net2=nets[k], type="via clearance",
+                    seg1=here, seg2=np.array([A[k], B[k]]), distance=float(dist[k]), min_required=need))
+        for w in vias[i + 1:]:
+            if w.net_name == v.net_name:
+                continue
+            d = float(np.linalg.norm(np.asarray(w.xy, dtype=float) - c))
+            need_vv = (float(v.dia) + float(w.dia)) / 2 + clearance_mm
+            if d < need_vv - 1e-6:
+                out.append(DrcViolation(
+                    layer="via", net1=v.net_name, net2=w.net_name, type="via clearance",
+                    seg1=here, seg2=np.array([w.xy, w.xy]), distance=d, min_required=need_vv))
+    if board_edge_clear_mm > 0 and (outline_xy is not None or board_poly is not None):
+        poly = board_poly if board_poly is not None else Polygon(outline_xy)
+        if not poly.is_empty:
+            for v in vias:
+                p = Point(float(v.xy[0]), float(v.xy[1]))
+                need = float(v.dia) / 2 + board_edge_clear_mm
+                d = poly.boundary.distance(p) if poly.contains(p) else -poly.boundary.distance(p)
+                if d < need - 1e-6:
+                    c = np.asarray(v.xy, dtype=float)
+                    out.append(DrcViolation(
+                        layer="via", net1=v.net_name, net2="board edge", type="via edge",
+                        seg1=np.array([c, c]), seg2=np.array([c, c]), distance=d, min_required=need))
+    return out
 
 
 class TaxelCopper:

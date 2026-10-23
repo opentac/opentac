@@ -7,6 +7,7 @@ drill writer and every Gerber in the same export use (see export/gerber.py).
 import numpy as np
 from opentac.cad.pipeline.types import Layout, Params
 from opentac.cad.export.kicad_footprint import pixel_geometry
+from opentac.cad.export.connector_contacts import with_drilled
 from opentac.cad.export.connector_geometry import connector_pad_geometries
 
 
@@ -16,8 +17,11 @@ def generate_drill_file(
     params: Params,
     outline_xy=None,
     connector_dir: str = "",
+    transition_vias=(),
+    drilled_pads=(),
 ) -> str:
-    """Generate Excellon drill file for pixel vias and connector drills."""
+    """Generate Excellon drill file for the taxel vias, the connector's
+    transition vias (export/connector_contacts.py) and any connector drill."""
     active_pix = sorted(set(range(len(layout.placements_xy))) - removed_pix)
     Pxy = layout.placements_xy
     g = pixel_geometry(params.pixel_w_mm, params.pixel_h_mm, params.trace_w_mm,
@@ -30,10 +34,14 @@ def generate_drill_file(
         holes.append((params.via_drill_mm, Pxy[k, 0] + g.via_x, Pxy[k, 1] - g.via_y))
 
     if outline_xy is not None and connector_dir:
-        for pad in connector_pad_geometries(layout, np.asarray(outline_xy, dtype=float), params, connector_dir):
+        for pad in with_drilled(connector_pad_geometries(layout, np.asarray(outline_xy, dtype=float), params,
+                                                         connector_dir), drilled_pads, params):
             if pad.get("drill"):
                 drill_xy = pad.get("drill_center", pad["center"])
                 holes.append((float(pad["drill"]), float(drill_xy[0]), float(drill_xy[1])))
+
+    for via in transition_vias or ():
+        holes.append((float(via.drill), float(via.xy[0]), float(via.xy[1])))
 
     tools: dict[float, list[tuple[float, float]]] = {}
     for dia, x, y in holes:

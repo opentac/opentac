@@ -214,11 +214,15 @@ as long as the narrow tail and the printed case need, at least 12 mm
 (`stats["tail_length_mm"]`, `stats["tail_length_reason"]`). Pass a length only if
 the user asks for one.
 
-The tail's contacts are on the **bottom** copper (the readout boards' Molex
-505110 is a bottom-contact connector for 0.3 mm FPC). The export opens solder
-mask on the bottom only there, and its drawing layer says where the polyimide
-stiffener goes: on the top (taxel side), 0.3 mm total. Tell the user this when
-they order. On the top the mask has one opening per taxel, at least 0.3 mm
+The tail's contacts are on the **bottom** copper by default; `contact_side: "top"`
+puts them on the top (taxel) face. Which face has to meet the connector's contacts
+depends on the connector and on how the user will mount the sensor, so do not
+assume it: keep the default unless the user says how the sensor is mounted. The fingers are plain pads on
+that face only, with no drill, and wires on another copper layer change to it
+through vias in the tail just before the stiffener. The export opens solder
+mask on that face only there, and its drawing layer says where the polyimide
+stiffener goes: on the other face (the top, the taxel side, by default), 0.3 mm
+total. Tell the user this when they order. On the top the mask has one opening per taxel, at least 0.3 mm
 apart (JLCPCB's coverlay minimum); on a dense board the openings are trimmed
 slightly into the electrodes and `stats["mask_note"]` says so.
 

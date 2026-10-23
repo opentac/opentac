@@ -121,12 +121,15 @@ def test_board_mask_openings(name):
     polys = re.findall(r'\(fp_poly \(pts ((?:\(xy [-\d.]+ [-\d.]+\) ?)+)\)[^\n]*\(layer "B\.Mask"\)', j1)
     assert len(polys) == 1
     finger_opening = Polygon([tuple(map(float, p)) for p in re.findall(r'\(xy ([-\d.]+) ([-\d.]+)\)', polys[0])])
-    fingers = re.findall(r'\(pad "\d+" thru_hole custom[^\n]*\(at ([-\d.]+) ([-\d.]+) 0\)', j1)
+    # Plain pads on the bottom copper, no drill (export/connector_contacts.py)
+    fingers = re.findall(r'\(pad "\d+" smd custom[^\n]*\(at ([-\d.]+) ([-\d.]+) 0\)', j1)
     assert len(fingers) == resp.stats["connector_pos"]
+    assert not re.search(r'\(pad "\d+"[^\n]*\(drill', j1)
     assert all(finger_opening.buffer(1e-6).contains(Point(float(a), float(b))) for a, b in fingers)
     vias = [(x + float(a), y + float(b)) for _, x, y, block in taxels
             for a, b in re.findall(r'thru_hole circle[^\n]*\(at ([-\d.]+) ([-\d.]+)\)', block)]
     assert len(vias) == len(taxels)
+    vias += [(float(a), float(b)) for a, b in re.findall(r'^  \(via \(at ([-\d.]+) ([-\d.]+)\)', pcb, re.M)]
     assert not any(finger_opening.buffer(0.3).contains(Point(v)) for v in vias)
     assert sum("B.Mask" in f[3] for f in fps) == 1          # only the connector opens the bottom
 

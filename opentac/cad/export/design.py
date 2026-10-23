@@ -102,6 +102,11 @@ def params_to_dict(params: Params) -> dict:
         "design_name": params.design_name,
         "readout_board": params.readout_board,
         "narrow_tail": params.narrow_tail,
+        # Only when it is not the default, so a bottom-contact design's
+        # manifest (and its configuration id) is what it was before the
+        # setting existed, and older versions of the tool still open it.
+        **({"contact_side": params.contact_side}
+           if (getattr(params, "contact_side", None) or "bottom") != "bottom" else {}),
     }
 
 
