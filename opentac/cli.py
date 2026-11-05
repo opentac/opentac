@@ -200,14 +200,26 @@ def _start_xampling(sensors, args):
         print(f"  xampling {'fixed' if args.fixed else 'grow'}, M = {got}")
 
 
+def _start_hdr(sensors, args):
+    if not getattr(args, "hdr", False):
+        return
+    print("zeroing at every gain for HDR: nothing may touch the skin...")
+    for s in sensors:
+        table = s.hdr()
+        print(f"  node {s.node}: " if s.node is not None else "  ", end="")
+        print("HDR on: gains " + ", ".join(table.labels()) + f", re-read at {table.clip} counts")
+
+
 def _view(args) -> int:
     from opentac.view import view
 
     sensors, bus = _open(args, all_nodes=True)
     try:
+        _start_hdr(sensors, args)          # first: Xampling's zero is then taken at HDR's gain
         _start_xampling(sensors, args)
         return view(sensors, bus=bus, shear=args.shear, vmax=args.vmax, save=args.save,
-                    description=args.description, snapshot=args.snapshot)
+                    description=args.description, snapshot=args.snapshot, hdr=args.hdr,
+                    floor=args.floor)
     finally:
         _close(sensors, bus)
 
@@ -217,6 +229,7 @@ def _record(args) -> int:
 
     sensors, bus = _open(args)
     try:
+        _start_hdr(sensors, args)
         _start_xampling(sensors, args)
         record(sensors[0], args.dir, seconds=args.seconds, description=args.description)
     finally:
@@ -318,6 +331,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save", metavar="DIR", help="record takes into DIR: Enter starts and stops")
     p.add_argument("--description", default="", help="free text stored with each take")
     p.add_argument("--snapshot", metavar="PNG", help="save one frame to a PNG and exit")
+    p.add_argument("--hdr", action="store_true",
+                   help="high dynamic range (60-pin board): each taxel at the highest gain that "
+                        "does not saturate it, with a gain map; zeroes first (hands off); "
+                        "h switches it off and on. Works with --xampling")
+    p.add_argument("--floor", type=float, default=0, metavar="COUNTS",
+                   help="draw taxels below this many counts as 0 (counts above the zero after "
+                        "b, or with --hdr; raw counts otherwise); on screen only")
     p.set_defaults(func=_view)
 
     p = sub.add_parser("record", help="record one take into DIR (Ctrl-C stops)")
@@ -326,6 +346,8 @@ def build_parser() -> argparse.ArgumentParser:
     session_args(p)
     p.add_argument("--seconds", type=float, help="stop after this long")
     p.add_argument("--description", default="", help="free text stored with the take")
+    p.add_argument("--hdr", action="store_true",
+                   help="record in high dynamic range (60-pin board; zeroes first, hands off)")
     p.set_defaults(func=_record)
 
     p = sub.add_parser("flash", help="put the prebuilt firmware on the board over USB (a new "

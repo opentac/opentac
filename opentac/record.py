@@ -15,6 +15,10 @@ A take is a folder named <date>_<time>_<slug> holding three files (format
                     `sampled` (frames x taxels bool) when xampling, `baseline` if one was set
     manifest.json   the skin's manifest, byte for byte as the board was set up with
     take.json       description, board and skin, session settings, frame statistics, notes
+
+A take with frames read in HDR (`Sensor.hdr()`) stores their values as the board
+sent them (the pass in bits 12-15) and, for those frames, the zero and gain of
+each pass (`hdr_*` arrays); `hdr_counts(take)` converts them.
 """
 from __future__ import annotations
 
@@ -62,6 +66,9 @@ def session(sensor) -> dict:
     if "GAIN_SW" in sensor.params:
         settings["gain_sw"] = sensor.get("GAIN_SW")
         settings["feedback_ohm"] = round(sensor.feedback_ohm(), 1)
+    if getattr(sensor, "hdr_on", False):
+        settings["hdr"] = dict(hdr_gains=f"0x{sensor.get('HDR_GAINS'):04X}",
+                               hdr_clip=sensor.get("HDR_CLIP"))
     return dict(
         manifest=dict(file=m.name if m else None, id=f"{m.config_id:08X}" if m else None,
                       n_taxels=m.n if m else stored.get("active"),
@@ -83,12 +90,23 @@ class Take:
         self.context = context or {}
         self.t_start = time.time()
         self.t, self.raw, self.meta, self.imu, self.sampled = [], [], [], [], []
+        self.hdr_index, self.hdr_tables = [], []    # per frame: which table converted it, -1 none
+        self.mode = []                              # per frame: the TAC_MODE that made it
         self.lock = threading.Lock()
 
     def add(self, frame):
-        values = np.where(frame.mask, np.nan_to_num(frame.taxels, nan=-1), -1).astype(np.int16)
+        sent = getattr(frame, "hdr_raw", None)      # HDR: the values as the board sent them
+        values = frame.taxels if sent is None else sent
+        values = np.where(frame.mask, np.nan_to_num(values, nan=-1), -1).astype(np.int16)
         imu = frame.imu or {}
         with self.lock:
+            if sent is None:
+                self.hdr_index.append(-1)
+            else:
+                if not any(frame.hdr is t for t in self.hdr_tables):
+                    self.hdr_tables.append(frame.hdr)
+                self.hdr_index.append(next(k for k, t in enumerate(self.hdr_tables) if t is frame.hdr))
+            self.mode.append(getattr(frame, "mode", 0))
             self.t.append(frame.t)
             self.raw.append(values)
             self.meta.append((getattr(frame, "index", len(self.t) - 1),
@@ -121,6 +139,8 @@ class Take:
             meta = np.asarray(self.meta, dtype=np.int64)
             imu = np.asarray(self.imu, dtype=float)
             sampled = list(self.sampled)
+            hdr_index, hdr_tables = np.asarray(self.hdr_index, dtype=np.int8), list(self.hdr_tables)
+            mode = np.asarray(self.mode, dtype=np.int8)
         path = self._dir()
         path.mkdir(parents=True)
         arrays = dict(raw=raw, t_host=t, frame_id=meta[:, 0],
@@ -135,6 +155,14 @@ class Take:
             arrays["sampled"] = mask
         if baseline is not None:
             arrays["baseline"] = np.asarray(baseline, dtype=np.float32)
+        if hdr_tables:
+            arrays.update(
+                hdr_table=hdr_index, hdr_mode=mode,
+                hdr_gain_sw=np.array([t.gain_sw for t in hdr_tables], dtype=np.int8),
+                hdr_gain=np.array([t.gain for t in hdr_tables], dtype=float),
+                hdr_zero=np.array([t.zero for t in hdr_tables], dtype=np.float32),
+                hdr_noise=np.array([t.noise for t in hdr_tables], dtype=np.float32),
+                hdr_clip=np.array([t.clip for t in hdr_tables], dtype=np.int16))
         np.savez_compressed(path / "tactile.npz", **arrays)
         self.manifest.save(path / "manifest.json")
 
@@ -162,6 +190,15 @@ class Take:
                          "Taxel j sits at xy[j] mm and is taxel_wh mm across",
                 geometry="xy/outline are the drawn layout (pixels_true for a simplified skin, "
                          "else pixels), in the manifest's mm frame"))
+        if hdr_tables:
+            info["notes"]["hdr"] = (
+                f"{int((hdr_index >= 0).sum())} frames were read in HDR: their raw values carry "
+                "the pass in bits 12-15 (value = raw + 4096 x pass). hdr_table[k] is the "
+                "table that converts frame k (-1: not HDR); table i holds hdr_gain_sw[i], "
+                "hdr_gain[i] and the zero at each gain, hdr_zero[i]. In an Xampling frame "
+                "(hdr_mode not 0) a pass-0 value is already counts above the board's zero. "
+                "opentac.record.hdr_counts(take) gives counts above the zero at the highest "
+                "gain, and the gain of each taxel")
         (path / "take.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
         return path
 
@@ -186,6 +223,29 @@ def record(sensor, outdir, seconds=None, description="", log=print) -> Path | No
     else:
         log(f"saved {path}: {len(take)} frames")
     return path
+
+
+def hdr_counts(take: dict):
+    """(counts, gain), frames x taxels, for a take from load_take(): HDR frames in counts
+    above the zero at the highest gain and the gain each taxel was read at; other frames
+    NaN. None if the take has no HDR frames."""
+    if "hdr_table" not in take:
+        return None
+    raw, index = take["raw"].astype(np.int64), take["hdr_table"]
+    read = take["sampled"] if "sampled" in take else np.ones(raw.shape, dtype=bool)
+    sparse = take["hdr_mode"] != 0 if "hdr_mode" in take else np.zeros(len(raw), dtype=bool)
+    counts, gain = np.full(raw.shape, np.nan), np.full(raw.shape, np.nan)
+    taxel = np.arange(raw.shape[1])
+    for i in np.unique(index[index >= 0]):
+        rows = index == i
+        r = np.where(read[rows], raw[rows], 0)
+        p = np.minimum(r >> 12, take["hdr_gain"].shape[1] - 1)
+        g = take["hdr_gain"][i][p]
+        c = ((r & 0x0FFF) - take["hdr_zero"][i][p, taxel]) / g
+        c = np.where(sparse[rows][:, None] & (p == 0), r & 0x0FFF, c)
+        counts[rows] = np.where(read[rows], c, np.nan)
+        gain[rows] = np.where(read[rows], g, np.nan)
+    return counts, gain
 
 
 def load_take(path) -> dict:

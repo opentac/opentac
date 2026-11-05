@@ -73,6 +73,10 @@ class BoardFrame(Frame):
     the TAC_MODE that produced it (0 raster, 1 xamp_fixed, 2 xamp_grow), `dt_us`
     is the time since the previous frame, `dropped` counts IMU samples the
     board had to drop. `node` and `t_us` (from Frame) are set for a bus node.
+
+    In HDR (`Sensor.hdr()`), `hdr_raw` holds the values as the board sent them
+    (the pass in bits 12-15) and `hdr` the opentac.device.hdr.HdrTable that
+    converted them; both None otherwise.
     """
 
     index: int = 0
@@ -80,6 +84,8 @@ class BoardFrame(Frame):
     mode: int = 0
     dt_us: int = 0
     dropped: int = 0
+    hdr_raw: np.ndarray | None = None
+    hdr: object | None = None
 
     @property
     def sparse(self) -> bool:

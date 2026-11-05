@@ -20,6 +20,10 @@ class Frame:
     `node` is the bus node the frame came from and `t_us` the bus controller's
     clock in microseconds, shared by all nodes; both None for a board on its
     own USB port and for the simulator.
+
+    `gain` is set for a frame read in HDR (`Sensor.hdr()`): the gain each taxel
+    was read at, relative to the highest (1 down to 1/148), and `taxels` are
+    then counts above the zero at the highest gain. None otherwise.
     """
 
     taxels: np.ndarray
@@ -29,6 +33,7 @@ class Frame:
     units: str = "counts"
     node: int | None = None
     t_us: int | None = None
+    gain: np.ndarray | None = None
 
     def __post_init__(self):
         self.taxels = np.asarray(self.taxels, dtype=float)

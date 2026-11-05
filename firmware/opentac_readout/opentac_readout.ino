@@ -244,6 +244,7 @@ bool xampReady = false;          // this skin can be xampled
 XampState xampState;
 uint16_t xampBaseline[OTCFG_MAX_TAXELS];
 uint16_t xampNoise[OTCFG_MAX_TAXELS];   // hands-off peak above baseline
+uint16_t xampBaselineMax = 4095;        // the highest baseline, for HDR's early out
 bool baselineValid = false;
 
 // The baseline is the mean of the first 16 zero frames: 16 x 4095 = 65520
@@ -497,8 +498,7 @@ static bool imuBegin() {
 // 1 closed. It powers up all open. Written from loop(), never mid-scan.
 #define GAIN_SWITCH_ADDR 0x4C
 
-static bool gainApply() {
-  const uint8_t want = (uint8_t)param(OT_P_GAIN_SW);
+static bool gainWrite(uint8_t want) {
   IMU_WIRE.beginTransmission(GAIN_SWITCH_ADDR);
   IMU_WIRE.write((uint8_t)0x00);
   IMU_WIRE.write(want);
@@ -507,6 +507,8 @@ static bool gainApply() {
   if (IMU_WIRE.requestFrom((uint8_t)GAIN_SWITCH_ADDR, (uint8_t)1) != 1) return false;
   return (uint8_t)IMU_WIRE.read() == want;
 }
+
+static bool gainApply() { return gainWrite((uint8_t)param(OT_P_GAIN_SW)); }
 #endif
 
 // Extra wait after each IMU FIFO drain, in microseconds; off by default (0).
@@ -633,6 +635,63 @@ static void scanTactileFrame(uint16_t extraSettleUs = 0) {
   }
 }
 
+#if defined(OT_BOARD_READOUT60)
+// ----- HDR raster (60-pin board) ----------------------------------------------
+//
+// After a raster scan at GAIN_SW, each nibble of HDR_GAINS (lowest first, up
+// to the first 0) is one more pass, at that GAIN_SW, over only the taxels whose
+// reading in the pass before reached HDR_CLIP. The new reading replaces the
+// old one, tagged with its pass in bits 12-15 (value = raw + 4096 x pass), so
+// the host converts every taxel with the gain it was actually read at. A pass
+// with nothing to re-read ends the frame, so a frame with nothing clipped
+// costs nothing extra; otherwise each pass costs one switch (~0.13 ms, written
+// and read back) plus one read per taxel, and the gain is back at GAIN_SW
+// before the frame is sent. A switch that does not take ends the passes: the
+// readings so far stand, and hdrFailures counts it.
+#define HDR_SETTLE_US 20    // after a switch: the first read 15 us after one is within 0.2 %
+uint32_t hdrFailures = 0;
+
+static void hdrRereadPasses() {
+  uint16_t gains = param(OT_P_HDR_GAINS);
+  if (gains == 0u) return;
+  const uint16_t clip = param(OT_P_HDR_CLIP);
+  if (peakTactile < clip) return;      // nothing reached the clip: no pass, no cost
+  const uint16_t rowSettleUs = param(OT_P_ROW_SETTLE_US);
+  const uint16_t muxSettleUs = param(OT_P_MUX_SETTLE_US);
+  const uint16_t active = deviceConfig.activeCount;
+  bool switched = false;
+
+  for (uint16_t pass = 1; (gains & 0x0Fu) != 0u; ++pass, gains = (uint16_t)(gains >> 4)) {
+    // Due: read in the pass before, and at or above the clip level there.
+    const uint16_t due = (uint16_t)((pass - 1u) << 12);
+    bool any = false;
+    for (uint16_t k = 0; k < active && !any; ++k) {
+      any = (tactileFrame[k] & 0xF000u) == due && (tactileFrame[k] & 0x0FFFu) >= clip;
+    }
+    if (!any) break;
+    if (!gainWrite((uint8_t)(gains & 0x0Fu))) { ++hdrFailures; break; }
+    switched = true;
+    delayMicroseconds(HDR_SETTLE_US);
+
+    rowWalkReset();
+    for (uint8_t step = 0; step < scanPlan.hwRowSteps; ++step) {
+      if (step != 0) rowWalkAdvance();
+      bool settled = false;
+      for (uint16_t e = scanPlan.stepStart[step]; e < scanPlan.stepStart[step + 1u]; ++e) {
+        const uint16_t slot = scanPlan.entryOut[e];
+        if ((tactileFrame[slot] & 0xF000u) != due || (tactileFrame[slot] & 0x0FFFu) < clip) continue;
+        if (!settled) { delayMicroseconds(rowSettleUs); settled = true; }
+        selectMuxChannel(scanPlan.entryMux[e]);
+        delayMicroseconds(muxSettleUs);
+        tactileFrame[slot] = (uint16_t)(adcRead() | (pass << 12));
+      }
+    }
+    rowsOff();
+  }
+  if (switched && !gainApply()) ++hdrFailures;
+}
+#endif
+
 // Xampling reads each batch in scan-plan order, so within a batch the walking 1
 // only moves forward; the next batch starts by clearing the register and
 // clocking forward again, which costs microseconds, not a settle.
@@ -724,6 +783,68 @@ static void scanXampleFrame() {
 
   peakTactile = xampState.peak;
 }
+
+#if defined(OT_BOARD_READOUT60)
+// ----- HDR in Xampling (60-pin board) -------------------------------------------
+//
+// The passes of hdrRereadPasses(), over only the taxels this frame sampled.
+// Their values are counts above the board's zero (`Z`, measured at GAIN_SW), so
+// a taxel is due for pass 1 when its value plus its zero reached HDR_CLIP. A
+// re-read value is the raw reading at that pass's gain, tagged with the pass as
+// in raster (raw + 4096 x pass): the board keeps a zero at one gain only, so
+// the host, which measured the zero at every gain, converts it. Reads go through
+// xampReadTaxel(), so each change of driven line costs one walk and ROW_SETTLE,
+// as the frame's own reads do.
+static inline bool hdrSampledDue(uint16_t taxel, uint16_t pass, uint16_t clip) {
+  if (((xampState.taxelMask[taxel >> 5] >> (taxel & 31u)) & 1u) == 0u) return false;
+  const uint16_t v = tactileFrame[taxel];
+  if ((uint16_t)(v >> 12) != (uint16_t)(pass - 1u)) return false;
+  const uint32_t raw = (pass == 1u) ? (uint32_t)v + xampBaseline[taxel] : (uint32_t)(v & 0x0FFFu);
+  return raw >= clip;
+}
+
+// Whether any sampled taxel is due: only the frame's samples are visited, so a
+// frame with nothing to re-read costs a few microseconds.
+static bool hdrSampledAny(uint16_t pass, uint16_t clip) {
+  for (uint16_t word = 0; word < XAMP_WORDS; ++word) {
+    uint32_t bits = xampState.taxelMask[word];
+    while (bits) {
+      const uint16_t taxel = (uint16_t)((word << 5) | (uint16_t)__builtin_ctz(bits));
+      bits &= bits - 1u;
+      if (hdrSampledDue(taxel, pass, clip)) return true;
+    }
+  }
+  return false;
+}
+
+static void hdrRereadSampled() {
+  uint16_t gains = param(OT_P_HDR_GAINS);
+  if (gains == 0u) return;
+  const uint16_t clip = param(OT_P_HDR_CLIP);
+  // No sampled reading can have reached the clip: none is above the frame's peak
+  // value plus the highest zero. So a frame with nothing pressed costs nothing.
+  if ((uint32_t)xampState.peak + xampBaselineMax < clip) return;
+  bool switched = false;
+
+  for (uint16_t pass = 1; (gains & 0x0Fu) != 0u; ++pass, gains = (uint16_t)(gains >> 4)) {
+    if (!hdrSampledAny(pass, clip)) break;
+    if (!gainWrite((uint8_t)(gains & 0x0Fu))) { ++hdrFailures; break; }
+    switched = true;
+    delayMicroseconds(HDR_SETTLE_US);
+
+    xampStep = 0xFF;
+    for (uint8_t step = 0; step < scanPlan.hwRowSteps; ++step) {
+      for (uint16_t e = scanPlan.stepStart[step]; e < scanPlan.stepStart[step + 1u]; ++e) {
+        const uint16_t slot = scanPlan.entryOut[e];
+        if (!hdrSampledDue(slot, pass, clip)) continue;
+        tactileFrame[slot] = (uint16_t)(xampReadTaxel(step, scanPlan.entryMux[e]) | (pass << 12));
+      }
+    }
+    rowsOff();
+  }
+  if (switched && !gainApply()) ++hdrFailures;
+}
+#endif
 
 // ----- RGB ------------------------------------------------------------------
 
@@ -1895,6 +2016,7 @@ static void handleZero() {
   for (uint16_t below = histogram[0]; below * 2u < active && medianBin < 7u; ) {
     below = (uint16_t)(below + histogram[++medianBin]);
   }
+  xampBaselineMax = baseMax;
   baselineValid = true;
   xampReset(&xampState);
   configChanged();
@@ -2054,8 +2176,17 @@ void loop() {
                         (!xampling || (xampReady && baselineValid));
   if (scanning) {
     const uint32_t scanStartUs = micros();
-    if (xampling) scanXampleFrame();
-    else scanTactileFrame();
+    if (xampling) {
+      scanXampleFrame();
+#if defined(OT_BOARD_READOUT60)
+      hdrRereadSampled();
+#endif
+    } else {
+      scanTactileFrame();
+#if defined(OT_BOARD_READOUT60)
+      hdrRereadPasses();
+#endif
+    }
     const uint32_t scanUs = micros() - scanStartUs;
     if (scanUs > statScanUsMax) statScanUsMax = scanUs;
 
@@ -2103,6 +2234,16 @@ void loop() {
 #endif
 
   updateRgb();
+
+#if defined(OT_BOARD_READOUT60)
+  // At most once a second, so a switch that keeps failing cannot flood the link.
+  static uint32_t hdrFailuresSaid = 0, hdrSaidMs = 0;
+  if (hdrFailures != hdrFailuresSaid && (uint32_t)(millis() - hdrSaidMs) >= 1000u) {
+    hdrFailuresSaid = hdrFailures;
+    hdrSaidMs = millis();
+    printLine("# HDR: a gain switch did not take; that frame kept the readings it had");
+  }
+#endif
 
   if (statusDue || (uint32_t)(millis() - lastStatusMs) >= STATUS_PERIOD_MS) {
     printStatus();
