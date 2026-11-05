@@ -1,6 +1,8 @@
-// DXF outline import: uploads a .dxf file to POST /import-dxf and hands the
-// chosen closed loop off to app.js via the same otc:*-outline event
-// convention stl-viewer.js already uses for STL face unfolding.
+// 2D outline import: uploads a .dxf or .svg file to POST /import-dxf or
+// /import-svg and hands the chosen closed loop off to app.js via the same
+// otc:dxf-outline event convention stl-viewer.js already uses for STL face
+// unfolding. SVG is the drawing-app counterpart of DXF (Inkscape, Illustrator,
+// Figma); both become one millimetre-space polygon.
 import { API_BASE } from "./config.js";
 import { setSource } from "./design-name.js";
 
@@ -15,6 +17,10 @@ fileInput?.addEventListener("change", async (event) => {
   fileInput.value = "";
   if (!file) return;
 
+  const kind = file.name.toLowerCase().endsWith(".svg") ? "svg" : "dxf";
+  const endpoint = kind === "svg" ? "/import-svg" : "/import-dxf";
+  const label = kind === "svg" ? "SVG" : "DXF";
+
   infoEl.textContent = `Importing ${file.name}…`;
   setSource(file.name);
   infoEl.classList.remove("error");
@@ -23,7 +29,7 @@ fileInput?.addEventListener("change", async (event) => {
   formData.append("file", file);
 
   try {
-    const resp = await fetch(`${API_BASE}/import-dxf`, { method: "POST", body: formData });
+    const resp = await fetch(`${API_BASE}${endpoint}`, { method: "POST", body: formData });
     if (!resp.ok) {
       const detail = await resp.json().catch(() => ({}));
       throw new Error(detail.detail || `HTTP ${resp.status}`);
@@ -34,9 +40,9 @@ fileInput?.addEventListener("change", async (event) => {
       ? data.warnings.join(" ")
       : `Imported ${chosen.length}-point outline from ${file.name}.`;
     window.dispatchEvent(new CustomEvent("otc:dxf-outline", {
-      detail: { outline: chosen, warnings: data.warnings || [] },
+      detail: { outline: chosen, warnings: data.warnings || [], source: kind },
     }));
   } catch (err) {
-    infoEl.innerHTML = `<span class="error">Import failed: ${err.message}</span>`;
+    infoEl.innerHTML = `<span class="error">${label} import failed: ${err.message}</span>`;
   }
 });
