@@ -23,6 +23,7 @@ def main():
     print(f"{raw.shape[0]} frames of {raw.shape[1]} taxels, "
           f"{take['info']['fps']:.0f} fps, sensor {take['manifest'].name}")
     print("taxel 0 is at", take["xy"][0], "mm")
+    print(f"play it back with: uv run opentac replay {path}")
 
 
 if __name__ == "__main__":

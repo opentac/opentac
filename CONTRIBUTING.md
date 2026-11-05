@@ -88,7 +88,9 @@ Open an issue with the bug report form. For a problem with a board or a sensor, 
 - your operating system;
 - the design ZIP from OpenTac-CAD, if the problem involves a sensor or its manifest;
 - what you expected and what you saw: a screenshot of `uv run opentac view`, and a photo of the
-  sensor's tail in the connector if readings are missing or mirrored.
+  sensor's tail in the connector if readings are missing or mirrored. A take folder from
+  `opentac record` or `opentac view --save` can be played later with `opentac replay`, which
+  needs no board.
 
 For a design that will not generate or fails DRC, the design ZIP (or the `design.json` inside it)
 is enough to reproduce it.
