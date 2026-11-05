@@ -8,6 +8,7 @@ from opentac.cad.pipeline.geometry import contiguous_runs
 from opentac.cad.pipeline.tail_extension import tail_extension_from_layout
 from opentac.cad.export.kicad_footprint import PIXEL_ATTR, mask_opening_line, pixel_geometry, fmt
 from opentac.cad.export.coverlay import connector_mask_opening, copper_layers_only, taxel_opening_for
+from opentac.cad.export.connector_contacts import with_drilled
 from opentac.cad.export.connector_geometry import connector_export_dir, connector_geometries, stitched_outline_segments
 from opentac.cad.export.silk_label import silk_label
 from opentac.cad.export.silk_backmark import backmark
@@ -26,12 +27,19 @@ def generate_kicad_pcb(
     params: Params,
     connector_dir: str,
     manifest_json: str | None = None,
+    transition_vias=(),
+    drilled_pads=(),
 ) -> str:
     """Generate complete KiCad .kicad_pcb file content as string.
 
     `manifest_json` is what export_manifest() produced for this same board. It
     is optional; when it is supplied the back silkscreen carries the taxel-core
     QR and the registration grid (see export/silk_backmark.py).
+
+    `transition_vias` are the through vias that bring wires on other layers to
+    the connector's contact face (export/connector_contacts.py); the routes
+    given are already cut at them. `drilled_pads` are the fingers that keep the
+    footprint's plated hole because their wire had no place for a via.
     """
     from opentac.cad.pipeline.geometry import tail_geometry
 
@@ -138,7 +146,7 @@ def generate_kicad_pcb(
     # footprint — with or without a custom tail extension.
     connector_dir = connector_export_dir(layout, connector_dir)
     conn_text = _build_connector_resolved(layout, outline_xy, params, connector_dir,
-                                           pad_to_net, net_map)
+                                           pad_to_net, net_map, drilled_pads=drilled_pads)
     if conn_text:
         lines.append(conn_text)
 
@@ -206,6 +214,12 @@ def generate_kicad_pcb(
         layer = getattr(route, "layer", None) or "B.Cu"
         for s in range(len(P) - 1):
             lines.append(_segment(P[s], P[s + 1], trace_w, layer, net_id))
+
+    # Transition vias to the connector's contact face (through vias)
+    for via in transition_vias or ():
+        if via.net_name not in net_map:
+            continue
+        lines.append(_via(via.xy, via.dia, via.drill, net_map[via.net_name]))
 
     # Intra-column bus lines (F.Cu)
     unique_col_nets = set(layout.col_net_per_pixel[i] for i in active_pix)
@@ -315,6 +329,11 @@ def _edge_line(v1, v2):
             f'(end {fmt(v2[0])} {fmt(-v2[1])}) (layer "Edge.Cuts") (width 0.15))')
 
 
+def _via(xy, dia, drill, net_id):
+    return (f'  (via (at {fmt(xy[0])} {fmt(-xy[1])}) (size {fmt(dia)}) (drill {fmt(drill)}) '
+            f'(layers "F.Cu" "B.Cu") (net {net_id}) (tstamp "{make_uuid()}"))')
+
+
 def _segment(p1, p2, width, layer, net_id):
     return (f'  (segment (start {fmt(p1[0])} {fmt(-p1[1])}) '
             f'(end {fmt(p2[0])} {fmt(-p2[1])}) '
@@ -403,11 +422,10 @@ def _connector_custom_pad_line(pad, pad_num, net_text, drill):
         corner_pts.append(f'(xy {fmt(p[0])} {fmt(p[1])})')
 
     drill_text = f' (drill {fmt(drill)})' if drill else ''
-    # The pad's own copper layers from the connector footprint: contacts are
-    # on the bottom copper (Molex 505110 is bottom-contact). Its mask opening
-    # is not the pad's own: one B.Mask opening spans the whole finger row
-    # (_build_connector_resolved), and the top stays covered under the
-    # stiffener.
+    # The pad's copper layer is the contact face's (Params.contact_side,
+    # export/connector_contacts.py), with no drill. Its mask opening is not the pad's own: one opening on that face
+    # spans the whole finger row (_build_connector_resolved), and the other
+    # face stays covered under the stiffener.
     if pad.get("layers"):
         layers = " ".join(f'"{name}"' for name in copper_layers_only(pad["layers"]))
     else:
@@ -422,7 +440,7 @@ def _connector_custom_pad_line(pad, pad_num, net_text, drill):
             f'(width 0) (fill yes))))')
 
 
-def _build_connector_resolved(layout, outline_xy, params, conn_dir, pad_to_net, net_map):
+def _build_connector_resolved(layout, outline_xy, params, conn_dir, pad_to_net, net_map, drilled_pads=()):
     """Emit connector geometry already resolved into board coordinates.
 
     Direct Gerber export is the working reference for angled tail extensions.
@@ -432,6 +450,7 @@ def _build_connector_resolved(layout, outline_xy, params, conn_dir, pad_to_net, 
     model = connector_geometries(layout, outline_xy, params, conn_dir)
     if not model:
         return None
+    model = {**model, "pads": with_drilled(model["pads"], drilled_pads, params)}
 
     conn_pos = int(layout.connector_pos)
     lines = []
@@ -529,15 +548,16 @@ def _build_connector_resolved(layout, outline_xy, params, conn_dir, pad_to_net, 
     return '\n'.join(lines)
 
 
-def kicad_project_files(params) -> dict[str, str]:
+def kicad_project_files(params, drilled_fingers: bool = False) -> dict[str, str]:
     """board.kicad_pro and board.kicad_dru for the exported board.
 
     The rules are the ones the board was generated to, read from the same
     parameters the generator and its own DRC use, so KiCad's DRC checks the
     design against what it is rather than against KiCad's rigid-board
     defaults. One scoped exception, in the custom rules: the connector's gold
-    fingers (J1) run to the end of the tab and carry the connector
-    footprint's own drill.
+    fingers (J1) run to the end of the tab. `drilled_fingers`: a finger kept the
+    footprint's plated hole (export/connector_contacts.py), whose 0.05 mm ring
+    is the footprint's own, so that exception is written too.
     """
     import json
 
@@ -570,21 +590,26 @@ def kicad_project_files(params) -> dict[str, str]:
         "(version 1)\n"
         "# The connector's gold fingers (J1) run to the end of the tab: the FPC is\n"
         "# inserted by them, and JLCPCB cuts fingers back to 0.2 mm from a flex\n"
-        "# outline. Each finger also carries the connector footprint's 0.2 mm drill,\n"
-        "# 0.05 mm from the finger's sides, as on every sensor made so far.\n"
+        "# outline.\n"
         "(rule \"Gold fingers reach the tab edge\"\n"
         "  (condition \"A.Parent == 'J1' || B.Parent == 'J1'\")\n"
         "  (constraint edge_clearance (min 0mm))\n"
         "  (severity ignore))\n"
-        "(rule \"Gold finger drills\"\n"
-        "  (condition \"A.Parent == 'J1'\")\n"
-        "  (constraint annular_width (min 0mm))\n"
-        "  (severity ignore))\n"
-        # Inside a taxel the row and column electrodes are the design's
-        # electrode gap apart (finger to finger) and center_clear apart (finger
-        # tip to the other spine or the row via); either can be tighter than the
-        # routing clearance. Everything else keeps the net class's routing
-        # clearance.
+    )
+    if drilled_fingers:
+        dru += (
+            "# A finger that kept the connector footprint's 0.2 mm drill, 0.05 mm from\n"
+            "# the finger's sides.\n"
+            "(rule \"Gold finger drills\"\n"
+            "  (condition \"A.Parent == 'J1'\")\n"
+            "  (constraint annular_width (min 0mm))\n"
+            "  (severity ignore))\n"
+        )
+    # Inside a taxel the row and column electrodes are the design's electrode
+    # gap apart (finger to finger) and center_clear apart (finger tip to the
+    # other spine or the row via); either can be tighter than the routing
+    # clearance. Everything else keeps the net class's routing clearance.
+    dru += (
         "# A taxel's two electrodes: the electrode gap between fingers, the\n"
         "# centre clearance at the finger tips.\n"
         "(rule \"Taxel electrode gap\"\n"

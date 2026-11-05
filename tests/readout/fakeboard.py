@@ -21,16 +21,22 @@ PARAMS = [  # id, name, lo, hi, default  (ot_api.h)
     (34, "XAMP_CONFIRM_US", 0, 500, 50),
 ]
 GAIN = (35, "GAIN_SW", 0, 15, 0)
+HDR = [(36, "HDR_GAINS", 0, 0xFFFF, 0), (37, "HDR_CLIP", 1, 4095, 3800)]
+SWITCH_OHM = (4700, 1100, 270, 68)     # readout60.json: each across the 10 kOhm feedback
+
+
+def feedback_ohm(sw):
+    return 1.0 / (1.0 / 10000 + sum(1.0 / r for k, r in enumerate(SWITCH_OHM) if sw >> k & 1))
 IMU_TAIL = "-12,1003,980,0,0,0,1.00000,0.00000,0.00000,0.00000,0.00,0.00,0.00"
 
 
 class FakeBoard:
     """pyserial-like: write(), read(), in_waiting, flush(), reset_input_buffer(), close()."""
 
-    def __init__(self, board="READOUT60", gain_ok=True):
+    def __init__(self, board="READOUT60", gain_ok=True, hdr=False):
         self.board = board
         self.steps = 16 if board == "NODE16" else 32
-        table = PARAMS + ([GAIN] if board == "READOUT60" else [])
+        table = PARAMS + ([GAIN] + (HDR if hdr else []) if board == "READOUT60" else [])
         self.spec = {pid: (name, lo, hi) for pid, name, lo, hi, _ in table}
         self.values = {pid: d for pid, _, _, _, d in table}
         self.order = [pid for pid, *_ in table]
@@ -44,6 +50,9 @@ class FakeBoard:
         self.commands = []             # every line received
         self.commits = 0
         self.dfu = False
+        # With hdr: raster frames come from `load` (counts per taxel at the highest gain,
+        # None = the fixed pattern) on an offset of 100 + 10 x GAIN_SW raw counts.
+        self.load = None
 
     # --- pyserial surface ---------------------------------------------------------
     def write(self, data):
@@ -105,18 +114,61 @@ class FakeBoard:
         active = self._config()[2]
         mode = self.values[2]
         head = f"{self.frame},{self.generation},{mode},3150,0"
-        if mode == 0:
+        if mode == 0 and self.load is not None:
+            values = ",".join(str(v) for v in self._hdr_scan(active))
+            self._say(f"F,{head},{values},{IMU_TAIL}")
+        elif mode == 0:
             values = ",".join(str((k * 37 + self.frame) % 4096) for k in range(active))
             self._say(f"V,{self.frame},1,2,3")
             self._say(f"F,{head},{values},{IMU_TAIL}")
         else:
             read = list(range(0, active, 3))[: self.values[29]]
+            vals = [k % 100 for k in read]
+            if self.load is not None:          # the loaded taxels too, then the HDR passes
+                read = sorted(set(read) | {k for k in range(active) if self.load[k] > 0})
+                vals = self._hdr_xamp(read)
             mask = bytearray((active + 7) // 8)
             for k in read:
                 mask[k >> 3] |= 1 << (k & 7)
-            values = ",".join(str(k % 100) for k in read)
+            values = ",".join(str(v) for v in vals)
             self._say(f"X,{head},{len(read)},{mask.hex().upper()},{values},{IMU_TAIL}")
         self.frame += 1
+
+    def _read_at(self, sw, k):
+        g = feedback_ohm(sw) / 10000
+        return min(4095, int(round(100 + 10 * sw + self.load[k] * g)))
+
+    def _hdr_scan(self, active):
+        """The firmware's HDR raster: a pass at GAIN_SW, then one per nibble of HDR_GAINS
+        over the taxels that reached HDR_CLIP in the pass before."""
+        vals = [self._read_at(self.values[35], k) for k in range(active)]
+        gains, clip, p = self.values.get(36, 0), self.values.get(37, 3800), 1
+        while gains & 0xF:
+            due = [k for k in range(active) if vals[k] >> 12 == p - 1 and vals[k] & 0xFFF >= clip]
+            if not due:
+                break
+            for k in due:
+                vals[k] = self._read_at(gains & 0xF, k) | (p << 12)
+            gains, p = gains >> 4, p + 1
+        return vals
+
+    def _hdr_xamp(self, read):
+        """Xampling with HDR: values above the zero at GAIN_SW (the offset there), then
+        each pass re-reads, as raw readings, the sampled taxels that reached HDR_CLIP."""
+        sw0 = self.values[35]
+        base = 100 + 10 * sw0
+        raw0 = {k: self._read_at(sw0, k) for k in read}
+        vals = {k: max(0, raw0[k] - base) for k in read}
+        gains, clip, p = self.values.get(36, 0), self.values.get(37, 3800), 1
+        while gains & 0xF:
+            due = [k for k in read if vals[k] >> 12 == p - 1
+                   and ((raw0[k] if p == 1 else vals[k] & 0xFFF) >= clip)]
+            if not due:
+                break
+            for k in due:
+                vals[k] = self._read_at(gains & 0xF, k) | (p << 12)
+            gains, p = gains >> 4, p + 1
+        return [vals[k] for k in read]
 
     def _handle(self, line):
         if not line:

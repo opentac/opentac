@@ -22,9 +22,10 @@ The export therefore opens:
   gap) gives m < 0: the opening stops |m| inside the electrodes' outer edge,
   and the export says so (TaxelOpening.note). The wiring between taxels stays
   covered.
-- on the bottom, one opening across the connector's gold fingers, from the
-  first finger's outer edge to the last's. Nothing else: the row vias are
-  covered on the bottom.
+- on the connector's contact face (the bottom unless Params.contact_side is
+  "top"), one opening across the connector's gold fingers, from the first
+  finger's outer edge to the last's (export/connector_contacts.py). Nothing
+  else on the bottom: the row vias and the transition vias are covered.
 
 kicad_pcb.py / kicad_footprint.py draw these as filled shapes on F.Mask and
 B.Mask (the pads themselves carry no mask layer), and gerber.py, the

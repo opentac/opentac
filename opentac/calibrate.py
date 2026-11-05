@@ -113,7 +113,8 @@ class SkinForce:
         return np.asarray(frame, float)
 
     def counts_above_zero(self, frame, zero=None):
-        """Counts minus the zero. Xampling frames are already above the board's zero: pass none."""
+        """Counts minus the zero. Xampling frames are already above the board's zero, and HDR
+        frames above the zero at every gain: pass none."""
         v = self._values(frame)
         return v - (0.0 if zero is None else np.asarray(zero, float))
 
@@ -125,7 +126,11 @@ class SkinForce:
         return np.nansum(self.taxels(frame, zero), axis=-1)
 
     def saturated(self, frame):
-        """Taxels at or above the curve's saturation count (raw counts, raster frames)."""
+        """Taxels at or above the curve's saturation count (raw counts, raster frames). In
+        HDR, only taxels there at the lowest gain, which no further pass could re-read."""
+        hdr, sent = getattr(frame, "hdr", None), getattr(frame, "hdr_raw", None)
+        if hdr is not None and sent is not None:
+            return hdr.saturated(sent, at=self.curve.sat_counts)
         return self._values(frame) >= self.curve.sat_counts
 
     def extrapolated(self, frame, zero=None):

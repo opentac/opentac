@@ -403,6 +403,16 @@
             </label>
             <label>Tail side padding <input id="tail_side_padding_mm" type="number" min="0" step="0.1" value="0.0" /></label>
           </div>
+          <div class="params params--emphasis" role="radiogroup" aria-label="Connector contacts">
+            <label class="check-field" title="The gold fingers are on the bottom face and the stiffener on the top. Choose the face that meets the connector's contacts in the way the sensor will be mounted.">
+              <input type="radio" name="contact_side" value="bottom" checked />
+              Connector contacts on the bottom face
+            </label>
+            <label class="check-field" title="The gold fingers are on the top face (the taxel side) and the stiffener on the bottom. Choose the face that meets the connector's contacts in the way the sensor will be mounted.">
+              <input type="radio" name="contact_side" value="top" />
+              Connector contacts on the top face (taxel side)
+            </label>
+          </div>
         </section>
 
       </aside>
@@ -784,6 +794,8 @@
           <dl class="help-glossary">
             <dt>Readout board (<code>readout_board</code>)</dt>
             <dd>The OpenTac board the sensor plugs into: 30-pin (up to 15 x 15 taxels, two stacked 16 x 22.8&nbsp;mm boards) or 60-pin (up to 30 x 30, one 37 x 34.3&nbsp;mm board). It sets the connector on the sensor's tail.</dd>
+            <dt>Connector contacts (<code>contact_side</code>)</dt>
+            <dd>Which face of the tail carries the gold fingers that the connector presses on: the bottom (the default) or the top, the taxel side. The right face depends on the connector and on how the sensor is mounted relative to it. The fingers are plain copper on that face only, and the stiffener goes on the other face. Wires on another copper layer change to the contact face through vias in the tail, just before the stiffener. The taxels and the wiring are the same either way.</dd>
             <dt>2 or 4 copper layers (<code>copper_layers</code>)</dt>
             <dd>On 2 layers, columns run on the top copper and rows on the bottom, and every wire travels around the outside of the sensor field to the connector, so the board needs a wiring band around the field. On 4 layers the rows are wired on two inner layers instead: In1 carries each row straight through the field to the connector, in row order, and In2 joins the pieces of rows a notch cuts in two. Rows then need no band, so with a fixed outline more of it holds taxels. Either choice works with either board mode below. A 4-layer board costs more to fabricate.</dd>
             <dt>Grow board to fit wiring (<code>board_mode: "expand"</code>)</dt>

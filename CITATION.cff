@@ -70,3 +70,9 @@ preferred-citation:
     - family-names: "Thakor"
       given-names: "Nitish V."
   year: 2026
+  doi: "10.48550/arXiv.2610.31661"
+  url: "https://arxiv.org/abs/2610.31661"
+  identifiers:
+    - type: other
+      value: "arXiv:2610.31661"
+      description: "arXiv identifier"

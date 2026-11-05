@@ -140,6 +140,17 @@ function markResultsStale() {
   pcbPreview.classList.add("pcb-preview--stale");
 }
 
+// The connector's contact face is built into the board's files at Generate
+// (Download ZIP and route edits reuse them), so changing it afterwards needs a
+// new Generate, as a changed outline does.
+for (const el of document.querySelectorAll('input[name="contact_side"]')) {
+  el.addEventListener("change", () => {
+    if (!statsEl || !statsEl.innerHTML) return;
+    genStatus.textContent = "Connector contacts changed — press Generate PCB to apply them to the board files.";
+    pcbPreview.classList.add("pcb-preview--stale");
+  });
+}
+
 function restoreSnapshot(snapshot) {
   vertices = cloneVertices(snapshot.vertices);
   fillVertices = cloneVertices(snapshot.fillVertices || []);
@@ -1696,6 +1707,7 @@ function readParams() {
   p.board_mode = selectedBoardMode();
   p.copper_layers = selectedCopperLayers();
   p.readout_board = document.querySelector('input[name="readout_board"]:checked')?.value || "auto";
+  p.contact_side = document.querySelector('input[name="contact_side"]:checked')?.value || "bottom";
   p.router = "hug";
   // In rows/cols mode the backend solves pixel size and pitch from the outline,
   // so the pixel_*/pitch_* values above are sent but ignored. Only send the

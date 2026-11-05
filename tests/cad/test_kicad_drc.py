@@ -31,6 +31,11 @@ CASES = {
                      "gap_mm": 0.4},
     "fixed": {"outline": [[0, 0], [50, 0], [50, 20], [25, 20], [25, 40], [0, 40]],
               "board_mode": "fixed_keepout"},
+    # Gold fingers on the top face: the rows change layer through vias in the tail.
+    "square_top_contacts": {"outline": [[-20, -20], [20, -20], [20, 20], [-20, 20]],
+                            "contact_side": "top"},
+    "tight_gap_4layer_top_contacts": {"outline": [[-15, -15], [15, -15], [15, 15], [-15, 15]],
+                                      "gap_mm": 0.1, "copper_layers": 4, "contact_side": "top"},
 }
 
 

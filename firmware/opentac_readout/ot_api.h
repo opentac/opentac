@@ -97,7 +97,7 @@ static inline bool otTacModeIsXampling(uint16_t mode) {
 // Unallocated here, reserved for bus-node features: 0 DEMAND_REF, 1 VIB_AXIS,
 // 10-12 projection weights, 13-18 per-modality LED channels and gains, 20-23
 // binary thresholds and the transition counter. 24-28: frame rate and IMU;
-// 29-34: xampling; 35: the 60-pin board's gain switch.
+// 29-34: xampling; 35: the 60-pin board's gain switch; 36-37: its HDR re-read.
 
 #define OT_P_TAC_MODE       2
 #define OT_P_LED_MODE       3
@@ -120,6 +120,8 @@ static inline bool otTacModeIsXampling(uint16_t mode) {
 #define OT_P_XAMP_BUMP_FILL 33  // 1 = growth fills whole shear bumps
 #define OT_P_XAMP_CONFIRM_US 34 // extra settle before re-reading a trigger
 #define OT_P_GAIN_SW       35   // 60-pin board: gain switches closed, bit k = SW(k+1)
+#define OT_P_HDR_GAINS     36   // 60-pin board: re-read passes, one GAIN_SW per nibble
+#define OT_P_HDR_CLIP      37   // 60-pin board: raw reading that sends a taxel to the next pass
 
 // 60-pin board: the gain at boot. 0 closes no switch, which leaves the 10 kOhm
 // feedback resistor alone: the highest gain, and the gain switch's own
@@ -184,6 +186,15 @@ static const OtParamSpec OT_PARAMS[] = {
   // so alone they give 3.2k, 990, 263 and 68 ohm. Less feedback, fewer counts
   // for the same press. Any combination works (they add in parallel).
   {OT_P_GAIN_SW,        "GAIN_SW",          0, 15,    OT_GAIN_SW_DEFAULT},
+  // HDR raster. 0 = off. Otherwise each nibble, lowest first, up to the first
+  // 0, is the GAIN_SW of one more pass that re-reads only the taxels whose
+  // reading in the pass before reached HDR_CLIP: 0x82 re-reads at 991 ohm, then
+  // at 67.5 ohm. A re-read value carries its pass in bits 12-15:
+  // value = raw + 4096 x pass. In xampling the passes re-read only the taxels
+  // the frame sampled, and a re-read value is that raw reading, not counts
+  // above the zero; values from pass 0 stay above the zero. Z ignores it.
+  {OT_P_HDR_GAINS,      "HDR_GAINS",        0, 0xFFFF, 0},
+  {OT_P_HDR_CLIP,       "HDR_CLIP",         1, 4095,  3800},
 #endif
 };
 

@@ -21,8 +21,11 @@ import time
 import warnings
 from pathlib import Path
 
+import numpy as np
+
 from opentac import manifest as manifest_mod
 from opentac.device import config as cfg
+from opentac.device import hdr as hdr_mod
 from opentac.device.link import BusLink, UsbLink
 from opentac.device.protocol import (ENUM_NAMES, DeviceError, parse_caps, parse_config,
                                      parse_frame, parse_param, parse_stats, parse_zero)
@@ -67,9 +70,9 @@ class Sensor:
     of the same name, `opentac.sim.Sensor(manifest)`, which returns a simulated
     sensor with `press()`; both give the same `opentac.frame.Frame`.
 
-    On open it asserts a known session: raster mode, MUX_SETTLE_US 8, IMU off
-    (each a keyword argument; None or False leaves that setting as the board
-    has it), plus any `settings` {name: value}. Session settings live on the
+    On open it asserts a known session: raster mode with HDR off, MUX_SETTLE_US 8,
+    IMU off (each a keyword argument; None or False leaves that setting as the
+    board has it), plus any `settings` {name: value}. Session settings live on the
     board until it reboots; the skin it holds persists.
     """
 
@@ -85,12 +88,15 @@ class Sensor:
             self.link = UsbLink(port, timeout)
         self.node = node
         self.rebooted = False
+        self._hdr_table, self._hdr_on, self._gain_before_hdr = None, False, None
         try:
             self.refresh()
             self.stored = self.config()
             self.manifest = cache_lookup(self.stored["config_id"]) if self.stored else None
             if raster:
                 self.set("TAC_MODE", "raster")
+                if self.params.get("HDR_GAINS", {}).get("value"):
+                    self._set("HDR_GAINS", 0)    # left on by a program that did not close
             if mux_settle_us is not None:
                 self.set("MUX_SETTLE_US", mux_settle_us)
             if imu is not None:
@@ -110,8 +116,17 @@ class Sensor:
         self.close()
 
     def close(self):
+        self._leave_hdr()
         if self._owns_link:
             self.link.close()
+
+    def _leave_hdr(self):
+        """Turn HDR off if this object turned it on, so other programs get plain frames."""
+        if self._hdr_on:
+            try:
+                self.hdr(False)
+            except Exception:              # an unplugged board: nothing to leave on
+                self._hdr_on = False
 
     def _command(self, text, until=None, match=None):
         return self.link.command(text, self.node, until, match)
@@ -173,8 +188,25 @@ class Sensor:
                 return names[value]
         return int(value)
 
+    #: Set by hdr() while HDR is on: a change there would make the frames' conversion wrong.
+    HDR_SETTINGS = ("GAIN_SW", "HDR_GAINS", "HDR_CLIP")
+
     def set(self, name: str, value) -> int:
-        """Set one parameter. Returns what the board stored (it clamps to range)."""
+        """Set one parameter. Returns what the board stored (it clamps to range).
+
+        While HDR is on, GAIN_SW, HDR_GAINS and HDR_CLIP belong to hdr(); HDR_GAINS is
+        turned on only by hdr(), which measures the zero every pass needs.
+        """
+        if name in self.HDR_SETTINGS and name in self.params:
+            if self._hdr_on:
+                raise DeviceError(f"{name} is set by HDR while it is on: call hdr(False) first, "
+                                  f"or hdr(gains=..., clip=...)")
+            if name == "HDR_GAINS" and self._resolve(name, value) != 0:
+                raise DeviceError("turn HDR on with hdr(): it measures the zero at every gain "
+                                  "and converts the frames")
+        return self._set(name, value)
+
+    def _set(self, name: str, value) -> int:
         if name not in self.params:
             raise DeviceError(f"no parameter {name!r} on this board; it has {sorted(self.params)}")
         p = self.params[name]
@@ -316,6 +348,9 @@ class Sensor:
                 continue
             if frame is None:
                 continue
+            frame = self._hdr_frame(frame)
+            if frame is None:
+                continue
             frame.node = self.node
             frame.t_us = getattr(self.link, "last_t_us", {}).get(self.node)
             if last_gen is not None and frame.generation < last_gen:
@@ -335,6 +370,8 @@ class Sensor:
                 frame = parse_frame(line, active)
             except ValueError:
                 continue                    # the tail of a line cut by the flush
+            if frame is not None:
+                frame = self._hdr_frame(frame)
             if frame is not None:
                 frame.node = self.node
                 frame.t_us = getattr(self.link, "last_t_us", {}).get(self.node)
@@ -376,6 +413,116 @@ class Sensor:
     def raster(self):
         """Back to reading every taxel every frame (TAC_MODE raster)."""
         self.set("TAC_MODE", "raster")
+
+    # --- HDR (60-pin board) ----------------------------------------------------------
+
+    def hdr(self, on: bool = True, *, zero: bool = True, clip: int | None = None,
+            gains=hdr_mod.LADDER):
+        """High dynamic range: each taxel read at the highest gain that does not saturate
+        it (60-pin board), in raster and in Xampling.
+
+        on=True first measures the zero at every gain, so nothing may touch the skin
+        (about 1 s; zero=False reuses the last one). Frames then carry `taxels` in
+        counts above that zero at the highest gain, whatever gain each taxel was read
+        at, and `gain`, the gain of each taxel (1 to 1/148 with the default `gains`,
+        GAIN_SW of each pass, highest first). `clip` sets HDR_CLIP (the board's,
+        3800, if None). on=False: one fixed gain again, frames as without HDR, and
+        GAIN_SW as it was before. Returns the HdrTable in use, or None when off.
+        close() turns HDR off.
+
+        In Xampling the zero at every gain is measured in raster, then the board's own
+        zero (`zero()`) again at the gain HDR scans first, and Xampling resumes; both
+        need nothing touching. Switching HDR off and on with zero=False needs neither
+        while GAIN_SW stays the same.
+        """
+        gain = self._gain()
+        param = gain["parameter"]
+        if "HDR_GAINS" not in self.params:
+            raise DeviceError("this board's firmware has no HDR: `opentac flash` installs "
+                              "firmware that has it")
+        mode = self.params["TAC_MODE"]["value"]
+        if not on:
+            self._set("HDR_GAINS", 0)
+            was_on, self._hdr_on = self._hdr_on, False
+            restore = self._gain_before_hdr
+            if was_on and restore is not None and restore != self.params[param]["value"]:
+                self._set(param, restore)
+                if mode != 0:
+                    self.zero()             # Xampling's zero was measured at the other gain
+            return None
+        gains = tuple(int(g) for g in gains)
+        if not self._hdr_on:
+            self._gain_before_hdr = self.params[param]["value"]
+        table = self._hdr_table
+        fresh = (zero or table is None or table.gain_sw != gains
+                 or table.zero.shape[1] != self._active())
+        if fresh:
+            if mode != 0:
+                self._set("TAC_MODE", 0)    # the zero at every gain is measured in raster
+            table = self._hdr_zero(gains)
+        if clip is not None:
+            self._set("HDR_CLIP", clip)
+        table.clip = self.params["HDR_CLIP"]["value"]
+        moved = self.params[param]["value"] != gains[0]
+        self._set(param, gains[0])
+        if self._set("HDR_GAINS", table.code) != table.code:
+            raise DeviceError(f"board refused HDR_GAINS 0x{table.code:04X}")
+        self._hdr_table, self._hdr_on = table, True
+        if mode != 0:
+            if fresh or moved:
+                self.zero()                 # the board's zero, at the gain HDR scans first
+            if self.params["TAC_MODE"]["value"] != mode:
+                self._set("TAC_MODE", mode)
+        return table
+
+    @property
+    def hdr_on(self) -> bool:
+        return self._hdr_on
+
+    def _hdr_zero(self, gains) -> hdr_mod.HdrTable:
+        """The zero and noise of every taxel at each gain in `gains`, HDR off meanwhile."""
+        param = self._gain()["parameter"]
+        self._set("HDR_GAINS", 0)
+        self._hdr_on = False
+        active = self._active()
+        zeros, noise = [], []
+        for sw in gains:
+            self._set(param, sw)
+            self.link.reset_input_buffer()
+            acc, deadline = [], time.time() + 10.0
+            while len(acc) < hdr_mod.ZERO_SKIP + hdr_mod.ZERO_FRAMES:
+                if time.time() > deadline:
+                    raise DeviceError("no frames while zeroing for HDR: is TAC_ENABLE 1?")
+                try:
+                    frame = parse_frame(self.link.readline(self.node), active)
+                except ValueError:
+                    continue                # the tail of a line cut by the flush
+                if frame is not None and frame.mode == 0:
+                    acc.append(frame.taxels)
+            acc = np.asarray(acc[hdr_mod.ZERO_SKIP:], dtype=float)
+            zeros.append(acc.mean(axis=0))
+            noise.append(acc.std(axis=0))
+        base = self.feedback_ohm(gains[0])
+        return hdr_mod.HdrTable(gain_sw=gains,
+                                gain=np.array([self.feedback_ohm(sw) / base for sw in gains]),
+                                zero=np.asarray(zeros), noise=np.asarray(noise),
+                                clip=self.params["HDR_CLIP"]["value"])
+
+    def _hdr_frame(self, frame):
+        """In HDR, convert a frame with the gain each taxel was read at. Without HDR the
+        frame is returned as it came; None drops a frame still scanned in HDR after HDR
+        was turned off."""
+        table = self._hdr_table
+        if table is None:
+            return frame
+        if not self._hdr_on:
+            tagged = (np.nan_to_num(frame.taxels, nan=0.0) > hdr_mod.RAW_MASK).any()
+            return None if tagged else frame
+        frame.hdr_raw = frame.taxels.copy()     # as sent: the pass in bits 12-15, NaN unread
+        frame.taxels, frame.gain = table.decode(frame.hdr_raw, board_zero=frame.mode != 0)
+        frame.hdr = table
+        frame.units = "counts above zero at the highest gain"
+        return frame
 
     # --- firmware ----------------------------------------------------------------
 
@@ -428,6 +575,8 @@ class Bus:
         self.close()
 
     def close(self):
+        for s in self.sensors:
+            s._leave_hdr()
         self.link.close()
 
     def frames(self, limit=None):
@@ -438,6 +587,7 @@ class Bus:
         active = {s.node: s.stored["active"] for s in self.sensors if s.stored}
         if not active:
             raise DeviceError("no node on this bus holds a skin; run `opentac setup` for one first")
+        by_node = {s.node: s for s in self.sensors}
         seen = 0
         while limit is None or seen < limit:
             got = self.link.readline_any()
@@ -449,6 +599,8 @@ class Bus:
             except ValueError as exc:
                 warnings.warn(f"node {node}: skipping a malformed frame: {exc}", stacklevel=2)
                 continue
+            if frame is not None:
+                frame = by_node[node]._hdr_frame(frame)
             if frame is None:
                 continue
             frame.node, frame.t_us = node, t_us
