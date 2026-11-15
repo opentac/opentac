@@ -19,7 +19,10 @@ so a phone camera opens the website's decoder page. The link is 28 characters
 longer than the payload, which usually costs one QR version, 1.4 mm a side
 per version. A board too small for it gets the bare payload,
 which a phone shows as text for the decoder page or `opentac manifest
-from-qr`; a board too small for that gets no QR.
+from-qr`; a board too small for that gets no QR. The code is decoded and
+checked against the manifest before it is printed; a board it cannot
+describe (columns out of order, unevenly spaced columns) gets no QR and a
+warning.
 
 The grid carries the board's shape, by making the photograph measurable. The
 outline is deliberately not in the QR (it is 80-95% of the payload, and the
@@ -85,7 +88,8 @@ import numpy as np
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import polylabel
 
-from opentac.cad.export.taxel_core import b41encode, encode as encode_core, qr_link
+from opentac.cad.export.taxel_core import (
+    TaxelCoreError, b41encode, check as check_core, encode as encode_core, qr_link)
 
 # Geometry, all mm. See the sizing note above before changing MODULE_MM.
 MODULE_MM = 0.35
@@ -521,7 +525,15 @@ def _backmark(manifest_json, enable=True):
     # printed instead is said rather than left to be found on the board.
     inner = _inset(edge_cuts, 0.0)
     qr, info, center, missed = [], None, None, []
-    for form in QR_FORMS:
+    # A QR that decodes to the wrong sensor is worse than none, so the code is
+    # decoded and checked against the manifest before anything is printed.
+    try:
+        check_core(manifest)
+        forms = QR_FORMS
+    except TaxelCoreError as exc:
+        forms = ()
+        omitted = "taxel-core QR omitted: %s; registration grid kept" % exc
+    for form in forms:
         size = _qr_size_mm(manifest, form)
         if size is None:
             break                # no segno, or a grid the format cannot hold
@@ -535,7 +547,7 @@ def _backmark(manifest_json, enable=True):
         missed.append((form, size))
 
     keep = []
-    warnings = []
+    warnings = [] if forms else [omitted]
     strokes, dim_bb = [], None
     if info:
         half = info["size_mm"] / 2.0 + QR_CLEAR_MM

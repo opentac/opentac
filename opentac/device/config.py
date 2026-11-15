@@ -115,14 +115,9 @@ def board(name: str) -> Board:
     return known[key]
 
 
-def derive_pitch_um(manifest: dict, warnings: list | None = None) -> tuple[int, int]:
-    """Taxel pitch in micrometres, x and y, from `pixels`.
-
-    Row index is pad order, not geometry, so ox/oy/px/py do not place taxels.
-    What the permutation does not change is the spacing, so the pitch is the
-    smallest gap between distinct coordinates; |px|/|py| and
-    design.params.pitch_*_mm only check that answer.
-    """
+def pitch_mm(manifest: dict) -> tuple[float, float]:
+    """Taxel pitch in mm, x and y, unrounded: the smallest gap between distinct
+    coordinates in `pixels` (see derive_pitch_um)."""
     pixels = manifest["pixels"]
     xs = sorted({round(p[0], 6) for p in pixels})
     ys = sorted({round(p[1], 6) for p in pixels})
@@ -132,8 +127,18 @@ def derive_pitch_um(manifest: dict, warnings: list | None = None) -> tuple[int, 
             raise ManifestError(f"cannot derive the {axis} pitch: only one distinct {axis} in pixels")
         return min(b - a for a, b in zip(values, values[1:]))
 
-    pitch_x_mm = smallest_step(xs, "x")
-    pitch_y_mm = smallest_step(ys, "y")
+    return smallest_step(xs, "x"), smallest_step(ys, "y")
+
+
+def derive_pitch_um(manifest: dict, warnings: list | None = None) -> tuple[int, int]:
+    """Taxel pitch in micrometres, x and y, from `pixels`.
+
+    Row index is pad order, not geometry, so ox/oy/px/py do not place taxels.
+    What the permutation does not change is the spacing, so the pitch is the
+    smallest gap between distinct coordinates; |px|/|py| and
+    design.params.pitch_*_mm only check that answer.
+    """
+    pitch_x_mm, pitch_y_mm = pitch_mm(manifest)
     notes = warnings if warnings is not None else []
     for axis, derived, declared in (("x", pitch_x_mm, abs(manifest.get("px", 0.0))),
                                     ("y", pitch_y_mm, abs(manifest.get("py", 0.0)))):
@@ -149,23 +154,43 @@ def derive_pitch_um(manifest: dict, warnings: list | None = None) -> tuple[int, 
     return round(pitch_x_mm * 1000.0), round(pitch_y_mm * 1000.0)
 
 
-def derive_geometry(manifest, rows, cols, pitch_x_um, pitch_y_um):
+def _fit_line(pairs):
+    """Least-squares (origin, pitch) through (grid index, coordinate) pairs; None for one index."""
+    n = len(pairs)
+    sk = sum(k for k, _ in pairs)
+    sv = sum(v for _, v in pairs)
+    skk = sum(k * k for k, _ in pairs)
+    skv = sum(k * v for k, v in pairs)
+    den = n * skk - sk * sk
+    if den == 0:
+        return None
+    pitch = (n * skv - sk * sv) / den
+    return (sv - pitch * sk) / n, pitch
+
+
+def derive_geometry(manifest, rows, cols, pitch_x_mm, pitch_y_mm):
     """Logical row/col -> grid position (top to bottom, left to right).
 
     From the lattice, not from rank: an empty logical row leaves a real gap, and
     ranking what is left would close it. Checked by rebuilding every pixel.
+
+    The pitch is the exact one from pitch_mm(), not the whole micrometres the
+    board stores. Coordinates rounded to 0.1 um can also make the smallest step
+    a little short of the true pitch (2.6936 against 2.69368 mm on the 60-pin
+    insole, 2.3 um short by row 29), so the rebuild is also checked against a
+    least-squares fit of the grid, and a grid that fits either within 1 um is
+    regular.
     """
     ys, xs = {}, {}
     for x, y, r, c in (p[:4] for p in manifest["pixels"]):
         ys.setdefault(r, round(y, 6))
         xs.setdefault(c, round(x, 6))
     origin_x, origin_y = min(xs.values()), max(ys.values())
-    pitch_x_mm, pitch_y_mm = pitch_x_um / 1000.0, pitch_y_um / 1000.0
 
     def grid_index(value, origin, pitch, axis, index):
         steps = (value - origin) / pitch
         nearest = round(steps)
-        if abs(steps - nearest) > 1e-3:
+        if abs(steps - nearest) > 0.25:
             raise ManifestError(
                 f"{axis} {index} sits {steps:.4f} pitches from the grid origin, not a whole "
                 f"number: the taxels are not on one regular grid, so the board cannot place them")
@@ -182,12 +207,22 @@ def derive_geometry(manifest, rows, cols, pitch_x_um, pitch_y_um):
         if placed and max(placed) >= extent:
             raise ManifestError(f"{axis} positions reach {max(placed)} but the grid is only "
                                 f"{extent} {axis}s: pixels span more grid than r/c declares")
-    for k, (x, y, r, c) in enumerate(p[:4] for p in manifest["pixels"]):
-        want_x = origin_x + col_geom[c] * pitch_x_mm
-        want_y = origin_y - row_geom[r] * pitch_y_mm
-        if abs(want_x - x) > 1e-3 or abs(want_y - y) > 1e-3:
-            raise ManifestError(f"grid index and pitch do not reproduce pixels[{k}]: got "
-                                f"({want_x:.4f}, {want_y:.4f}), pixels says ({x:.4f}, {y:.4f})")
+
+    # Each axis must rebuild every pixel within 1 um, from the smallest step or from the fit.
+    pix = [p[:4] for p in manifest["pixels"]]
+    for axis, geom, coord, origin, pitch in (("x", col_geom, 0, origin_x, pitch_x_mm),
+                                             ("y", row_geom, 1, origin_y, -pitch_y_mm)):
+        index = 3 if axis == "x" else 2
+        pairs = [(geom[p[index]], p[coord]) for p in pix]
+        lines = [(origin, pitch)]
+        fit = _fit_line(pairs)
+        if fit is not None:
+            lines.append(fit)
+        worst = [max(abs(o + k * s - v) for k, v in pairs) for o, s in lines]
+        if min(worst) > 1e-3:
+            k = max(range(len(pairs)), key=lambda i: abs(origin + pairs[i][0] * pitch - pairs[i][1]))
+            raise ManifestError(f"grid index and pitch do not reproduce pixels[{k}]: {axis} is "
+                                f"off the grid by {min(worst) * 1000:.1f} um")
     return row_geom, col_geom
 
 
@@ -244,7 +279,7 @@ def extract(manifest: dict, on: Board) -> dict:
             f"pad {cp[c]}). This skin was laid out for a different readout board")
 
     pitch_x_um, pitch_y_um = derive_pitch_um(manifest, warnings)
-    row_geom, col_geom = derive_geometry(manifest, rows, cols, pitch_x_um, pitch_y_um)
+    row_geom, col_geom = derive_geometry(manifest, rows, cols, *pitch_mm(manifest))
 
     shear = manifest.get("shear")
     shear_groups = None

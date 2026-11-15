@@ -107,3 +107,64 @@ def test_firmware_parses_and_xamples_these_configs(tmp_path):
         out = subprocess.run([str(exe), *files], capture_output=True, text=True)
         assert out.returncode == 0 and "all passed" in out.stdout, out.stdout[-2000:]
         assert len(re.findall(r"taxels, bump radius", out.stdout)) == len(names)
+
+
+def _with_pitch(manifest, pitch_mm, size_mm):
+    """The manifest with every taxel moved onto a square grid of `pitch_mm`, about its first taxel."""
+    m = json.loads(json.dumps(manifest))
+    xs = sorted({p[0] for p in m["pixels"]})
+    ys = sorted({p[1] for p in m["pixels"]})
+    old = min(b - a for a, b in zip(xs, xs[1:]))
+    x0, y0 = xs[0], ys[-1]
+    m["pixels"] = [[x0 + (x - x0) * pitch_mm / old, y0 + (y - y0) * pitch_mm / old, r, c]
+                   for x, y, r, c in (p[:4] for p in m["pixels"])]
+    m["w"] = m["h"] = size_mm
+    for key in ("px", "py"):
+        m.pop(key, None)
+    m.get("design", {}).get("params", {}).pop("pitch_x_mm", None)
+    m.get("design", {}).get("params", {}).pop("pitch_y_mm", None)
+    return m
+
+
+def test_a_pitch_that_is_not_whole_micrometres_places_every_row():
+    """The board stores the pitch in whole micrometres, but the grid check uses the
+    exact pitch: rounding 2.6936 mm to 2694 um moved row 8 of a 9-row grid off the
+    grid by more than the check allows, and setup refused a regular grid."""
+    raw = json.loads((EXAMPLES / "square_9x9_60pin.json").read_text())
+    m = _with_pitch(raw, 2.6936, 2.5)
+    _, info = device_config(m, "READOUT60")
+    assert (info["pitch_x_um"], info["pitch_y_um"]) == (2694, 2694)
+    assert sorted(g for g in info["row_geom"] if g != 0xFF) == list(range(9))
+    assert sorted(g for g in info["col_geom"] if g != 0xFF) == list(range(9))
+
+
+def test_a_grid_that_is_not_regular_is_still_refused():
+    """The exact pitch does not loosen the check: a column a third of a pitch off
+    the grid is refused, as before."""
+    raw = json.loads((EXAMPLES / "square_9x9_60pin.json").read_text())
+    m = json.loads(json.dumps(raw))
+    m["pixels"] = [[x + (1.4 if c == 8 else 0.0), y, r, c] for x, y, r, c in (p[:4] for p in m["pixels"])]
+    with pytest.raises(ManifestError):
+        device_config(m, "READOUT60")
+
+
+def test_a_generated_board_with_rounded_coordinates_sets_up():
+    """The 60-pin insole case: a 2.69368 mm pitch over 30 rows. The manifest rounds
+    coordinates to 0.1 um, so its steps read 2.6936 or 2.6937 mm and the smallest
+    one falls 2.3 um short by row 29. Setup refused the board ('row 9 sits 8.9989
+    pitches from the grid origin'); the grid is regular to 0.05 um."""
+    import base64
+    import io
+    import zipfile
+    from opentac.cad.main import GenerateRequest, generate
+
+    pitch = 2.69368
+    w, h = 6 * pitch + 1.0, 30 * pitch + 1.0
+    resp = generate(GenerateRequest(outline=[[0, 0], [w, 0], [w, h], [0, h]], router="hug",
+                                    board_mode="expand", pixel_w_mm=2.5, pixel_h_mm=2.5,
+                                    pitch_x_mm=pitch, pitch_y_mm=pitch))
+    m = json.loads(zipfile.ZipFile(io.BytesIO(base64.b64decode(resp.zip_b64))).read("manifest.json"))
+    assert m["r"] == 30
+    _, info = device_config(m, "READOUT60")
+    assert info["pitch_y_um"] == 2694
+    assert sorted(g for g in info["row_geom"] if g != 0xFF) == list(range(30))

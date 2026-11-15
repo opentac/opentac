@@ -439,3 +439,57 @@ def test_a_small_exported_board_carries_the_bare_code_in_both_files():
     assert pcb.count('(layer "B.SilkS")') == len(mark["rects"]) + n_seg
     gbo = z.read("gerber/board-B_Silkscreen.gbo").decode()
     assert gbo.count("G36*") == len(mark["rects"])
+
+
+def _blank_column(manifest, ci):
+    """`manifest` with column `ci` emptied, as removing taxels after routing leaves it."""
+    m = json.loads(json.dumps(manifest))
+    m["pixels"] = [p for p in m["pixels"] if p[3] != ci]
+    m["m"] = [row[:ci] + "0" + row[ci + 1:] for row in m["m"]]
+    return m
+
+
+@pytest.mark.parametrize("where", ["first", "middle", "last"])
+def test_qr_decodes_when_a_column_has_no_active_taxel(where):
+    """The decoder looks columns up by manifest index, so the column table needs an
+    entry for an empty column too. Without one, every later column read its
+    neighbour's entry, and the site and `from-qr` failed with 'index out of range'
+    (found on the CoRL piano and drum pad)."""
+    manifest_json, _ = _manifest(SQUARE, "expand", 2.0, 2.2)
+    m = json.loads(manifest_json)
+    ci = {"first": 0, "middle": m["c"] // 2, "last": m["c"] - 1}[where]
+    m = _blank_column(m, ci)
+    mark = backmark(json.dumps(m))
+    assert mark["qr"], mark["warnings"]
+    assert not any("omitted" in w for w in mark["warnings"])
+
+    core = decode(b41decode(mark["qr"]["payload"]))
+    assert core["m"] == m["m"]
+    rebuilt = {(r, c): (x, y) for x, y, r, c, _, _ in taxels(core)}
+    ref = {(r, c): (x, y) for x, y, r, c in m["pixels"]}
+    assert set(rebuilt) == set(ref)
+    worst = max(max(abs(rebuilt[k][0] - ref[k][0]), abs(rebuilt[k][1] - ref[k][1])) for k in ref)
+    assert worst <= 0.01
+
+
+def test_qr_is_left_off_rather_than_misplacing_taxels():
+    """Columns whose pads run right to left, or columns that are not evenly spaced,
+    are boards the taxel core cannot describe. The mark leaves the QR off and says
+    so, instead of printing a code that decodes to the wrong sensor."""
+    manifest_json, _ = _manifest(SQUARE, "expand", 2.0, 2.2)
+    m = json.loads(manifest_json)
+    c = m["c"]
+
+    reversed_cols = json.loads(manifest_json)
+    reversed_cols["pixels"] = [[x, y, r, c - 1 - ci] for x, y, r, ci in m["pixels"]]
+    reversed_cols["m"] = [row[::-1] for row in m["m"]]
+    reversed_cols["cp"] = m["cp"][::-1]
+
+    uneven = json.loads(manifest_json)
+    uneven["pixels"] = [[x + (0.7 if ci >= c // 2 else 0.0), y, r, ci] for x, y, r, ci in m["pixels"]]
+
+    for tag, case in (("reversed columns", reversed_cols), ("uneven columns", uneven)):
+        mark = backmark(json.dumps(case))
+        assert mark["qr"] is None, tag
+        assert any(w.startswith("taxel-core QR omitted") for w in mark["warnings"]), (tag, mark["warnings"])
+        assert mark["rects"], "%s: the registration grid should still be drawn" % tag
