@@ -220,14 +220,37 @@ def analyze(manifest):
     rank = {i: ys.index(row_y[i]) for i in row_y}
     perm = [rank.get(i, 0) for i in range(manifest["r"])]
 
-    # manifest col index -> index into xs. Expected to be the identity, but
-    # checked rather than assumed.
-    col_map = [sorted(col_x).index(i) for i in sorted(col_x)]
-    assert col_map == list(range(len(col_map))), "column indices are not in geometric order"
+    # The decoder looks each column up by its manifest index (kx[ci] in
+    # taxels()), so the occupied columns, taken in index order, must run left
+    # to right. A board whose pad block reverses its columns cannot be
+    # described by this format.
+    occupied = sorted(col_x)
+    if [col_x[i] for i in occupied] != xs:
+        raise TaxelCoreError("column indices are not in left-to-right order; "
+                             "the taxel core cannot describe this board")
+
+    # Every manifest column needs an entry in the column table, active taxels
+    # or not: the decoder indexes the table by manifest column, so one missing
+    # entry shifts every column after it. A column with no active taxel takes
+    # the next lattice slot after the column before it (a leading one moves
+    # the origin left); the mask already marks it empty.
+    x0 = xs[0]
+    c = manifest["c"]
+    if len(occupied) < c:
+        lead = occupied[0]
+        slot = {ci: k + lead for ci, k in zip(occupied, kx)}
+        full = []
+        for ci in range(c):
+            k = slot.get(ci, full[-1] + 1 if full else ci)
+            if full and k <= full[-1]:
+                raise TaxelCoreError("column %d has no free lattice slot" % ci)
+            full.append(k)
+        kx = full
+        x0 = round(xs[0] - lead * pitch_x, 4)
 
     return {
         "r": manifest["r"], "c": manifest["c"],
-        "x0": xs[0], "y0": ys[0],
+        "x0": x0, "y0": ys[0],
         "pitch_x": pitch_x, "pitch_y": pitch_y,
         "w": manifest["w"], "h": manifest["h"],
         "footprint": manifest.get("footprint") or dict(FP_DEFAULT),
@@ -436,6 +459,34 @@ def taxels(core):
             y = core["y0"] - core["ky"][core["perm"][ri]] * core["pitch_y"]
             out.append((round(x, 4), round(y, 4), ri, ci, core["rp"][ri], core["cp"][ci]))
     return out
+
+
+def check(manifest):
+    """Encode, decode and rebuild every taxel; the decoded core, or
+    TaxelCoreError unless each taxel decodes where the manifest puts it.
+
+    Pitch and origin are stored to 1/Q mm, so a taxel k lattice steps from the
+    origin can move by up to about (k + 1) / (2 Q) mm. Anything beyond that is
+    a board the format does not describe, such as unevenly spaced columns.
+    """
+    try:
+        core = decode(encode(manifest))
+        got = {(t[2], t[3]): t[:2] for t in taxels(core)}
+    except TaxelCoreError:
+        raise
+    except (ValueError, IndexError) as exc:
+        raise TaxelCoreError("the code does not decode: %s" % exc)
+    want = {(p[2], p[3]): p[:2] for p in manifest["pixels"]}
+    if set(got) != set(want):
+        raise TaxelCoreError("the code would describe a different set of taxels")
+    n = max(core["kx"] + core["ky"] + [0]) + 1
+    tol = 0.011 + n / (2.0 * Q)
+    bad = sum(1 for k in want
+              if abs(want[k][0] - got[k][0]) > tol or abs(want[k][1] - got[k][1]) > tol)
+    if bad:
+        raise TaxelCoreError("%d of %d taxels would decode to the wrong place"
+                             % (bad, len(want)))
+    return core
 
 
 # --------------------------------------------------------------------------

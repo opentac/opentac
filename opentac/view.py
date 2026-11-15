@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from opentac import manifest as manifest_mod
-from opentac.device.config import derive_pitch_um
+from opentac.device.config import derive_pitch_um, pitch_mm
 from opentac.record import Take, iter_frames, load_take, peak_frame_index, session
 
 BASELINE_FRAMES = 30
@@ -113,6 +113,15 @@ def _skin_cells(ax, manifest):
     pixels = view["pixels"]
     w = view.get("w") or derive_pitch_um(view)[0] / 1000.0 * 0.9
     h = view.get("h") or w
+    # The manifest stores the taxel size to 0.01 mm, so a taxel as wide as its
+    # pitch (4.162 mm) comes back as 4.16, and the 2 um gap shows as a hairline
+    # seam wherever it lands on a pixel boundary. Draw such taxels at the pitch.
+    try:
+        px, py = pitch_mm(view)
+        w = px if 0 < px - w < 0.015 else w
+        h = py if 0 < py - h < 0.015 else h
+    except manifest_mod.ManifestError:
+        pass
     tilt = np.radians(float(view.get("pixel_rot_deg", 0.0) or 0.0))
     c, s = np.cos(tilt), np.sin(tilt)
 
