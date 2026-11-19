@@ -1,4 +1,4 @@
-// Landing page: mode selection (Draw / DXF / STL / Describe / Open), the
+// Landing page: mode selection (Draw / DXF-SVG / STL / Describe / Open), the
 // in-tool mode switcher, and the "take the tour" / "browse help" entry points.
 import { showView } from "./views.js";
 

@@ -44,7 +44,7 @@
         <p>
           OpenTac-CAD lays out a piezoresistive tactile sensor on a flex PCB, for a
           gripper finger, a hand, a wearable or any other surface. You give it a 2D
-          outline: draw it here, import a DXF, or unfold a surface of an STL model.
+          outline: draw it here, import a DXF or SVG, or unfold a surface of an STL model.
           It places the taxels, routes every row and column to the connector, checks
           the result against the design rules (DRC) and writes KiCad and Gerber files.
           No manual PCB layout is needed.
@@ -98,9 +98,9 @@
           <button type="button" class="primary mode-card__cta" data-mode="draw">Start drawing</button>
         </article>
         <article class="panel mode-card">
-          <h2>Import a DXF</h2>
-          <p>Upload a closed 2D outline as a .dxf file, for example from AutoCAD or Fusion 360. The largest closed shape in the file becomes the board outline.</p>
-          <button type="button" class="primary mode-card__cta" data-mode="dxf">Upload DXF</button>
+          <h2>Import a DXF or SVG</h2>
+          <p>Upload a closed 2D outline as a .dxf or .svg file, for example from AutoCAD, Fusion 360, Inkscape or Illustrator. The largest closed shape in the file becomes the board outline.</p>
+          <button type="button" class="primary mode-card__cta" data-mode="dxf">Upload DXF or SVG</button>
         </article>
         <article class="panel mode-card">
           <h2>Import an STL</h2>
@@ -173,7 +173,7 @@
           </ol>
           <p class="guide-card__note">
             Useful for shapes that are easier to describe than to draw, such as an insole or a
-            glove fingertip. It also reads DXF and STL files of a part.
+            glove fingertip. It also reads DXF, SVG and STL files of a part.
           </p>
         </article>
       </div>
@@ -188,7 +188,7 @@
         <div class="mode-switcher" role="group" aria-label="Input mode">
           <span class="mode-switcher__label">Mode:</span>
           <button type="button" class="mode-button" data-mode="draw" id="mode-btn-draw">Draw</button>
-          <button type="button" class="mode-button" data-mode="dxf" id="mode-btn-dxf">DXF</button>
+          <button type="button" class="mode-button" data-mode="dxf" id="mode-btn-dxf">DXF / SVG</button>
           <button type="button" class="mode-button" data-mode="stl" id="mode-btn-stl">STL</button>
           <button type="button" class="mode-button" data-mode="chat" id="mode-btn-chat">Describe</button>
           <button type="button" class="mode-button" data-mode="open" id="mode-btn-open">Open</button>
@@ -257,13 +257,13 @@
         </section>
 
         <section class="group" id="dxf-import-group" hidden>
-          <h2>1 · Import DXF</h2>
+          <h2>1 · Import DXF or SVG</h2>
           <p class="hint">
-            Upload a closed 2D outline (<code>.dxf</code>). We'll automatically pick the largest closed shape in the file.
+            Upload a closed 2D outline (<code>.dxf</code> or <code>.svg</code>). We'll automatically pick the largest closed shape in the file.
           </p>
           <div class="row">
-            <button id="upload-dxf" type="button" class="primary">Upload DXF</button>
-            <input id="dxf-input" type="file" accept=".dxf" hidden />
+            <button id="upload-dxf" type="button" class="primary">Upload DXF or SVG</button>
+            <input id="dxf-input" type="file" accept=".dxf,.svg,image/svg+xml" hidden />
           </div>
           <div id="dxf-info" class="mini"></div>
         </section>
@@ -744,11 +744,11 @@
       <div class="help-content">
         <section id="help-modes" class="panel help-section">
           <h2>Getting a board shape</h2>
-          <p>Every design starts the same way: get a closed 2D outline into the Board Outline canvas. There are three ways to do that — mix and match, or switch mid-project using the Mode switcher.</p>
+          <p>Every design starts the same way: get a closed 2D outline into the Board Outline canvas. Draw it, import a DXF or SVG, or unfold an STL — mix and match, or switch mid-project using the Mode switcher.</p>
           <h3>Draw</h3>
           <p>Use the Line, Rectangle, H/V, and Arc tools to sketch your outline directly. When you're done, <strong>select the edge where the connector tail should exit and click Set cable edge</strong> (it turns orange) — Generate is blocked until this is set, so a stray first stroke can never silently become the connector edge. This isn't just freehand: select a vertex or edge and type an exact <strong>Length</strong> and <strong>Angle</strong> in the fields above the canvas to dimension it precisely, like a real CAD program.</p>
-          <h3>DXF</h3>
-          <p>Upload a closed 2D outline exported from AutoCAD, Fusion 360, or similar CAD tools. We automatically pick the <strong>largest closed shape</strong> in the file (in case it contains extra reference geometry) and scale it to millimeters using the file's unit metadata. A DXF outline has no inherent cable edge — confirm or change it with <strong>Set cable edge</strong> after import.</p>
+          <h3>DXF or SVG</h3>
+          <p>Upload a closed 2D outline exported from AutoCAD, Fusion 360, Inkscape, Illustrator, or a similar drawing tool, as <code>.dxf</code> or <code>.svg</code>. We automatically pick the <strong>largest closed shape</strong> in the file (in case it contains extra reference geometry) and scale it to millimetres using the file's unit metadata (SVG <code>width</code> / <code>viewBox</code>, or DXF <code>$INSUNITS</code>). Paths, polygons, rectangles, circles and ellipses in an SVG are flattened to the same 0.05&nbsp;mm chord as a DXF. An imported outline has no inherent cable edge — confirm or change it with <strong>Set cable edge</strong> after import.</p>
           <h3>STL</h3>
           <p>Upload a 3D model, then click a face (or several connected faces, or a smoothly curved patch) to select the surface your sensor will cover — or use <strong>Draw patch</strong> to click points directly on the surface and outline your sensor by hand, letting the app smooth away texture like tread patterns. <strong>Unfold selection</strong> flattens the result into a 2D outline using a true-scale unfolding algorithm — like unwrapping a physical piece of paper from the part. The result lands in the same Board Outline canvas, where you can still hand-edit it. Like a DXF import, an unfolded outline has no inherent cable edge — confirm or change it with <strong>Set cable edge</strong> once it loads.</p>
           <p>If your selection spans surfaces that don't share a mesh edge (say, a fingertip's front face plus its two sides), the button changes to <strong>Join surfaces…</strong> and the viewer walks you through the join, one cut at a time: it shows numbered marker dots along each surface's boundary, and you click <strong>two matching corner pairs</strong> — "this corner attaches to that one" — for each cut. Only after every cut is resolved does the 2D preview appear, with <strong>Use this shape</strong> handing it to the outline canvas. Picking the corners yourself is deliberate: you can see the real part, so you know which corners truly touch.</p>
@@ -886,8 +886,8 @@
             <dd>Your outline is too small for the current taxel size, pitch, and edge keepout. Draw a larger outline or reduce those parameters.</dd>
             <dt>"Sensor fill region does not overlap the board outline"</dt>
             <dd>The sensorize zone you drew is fully outside the board outline — make sure it's drawn inside the outline shape.</dd>
-            <dt>"No closed outline found — check the DXF contains a single closed polyline/region (no gaps or open ends)" (DXF import)</dt>
-            <dd>The DXF file doesn't contain one clean closed loop of geometry — check for gaps, unconnected segments, or stray extra shapes in the source file.</dd>
+            <dt>"No closed outline found" (DXF or SVG import)</dt>
+            <dd>The file doesn't contain one clean closed loop of geometry — check for gaps, unconnected segments, or stray extra shapes in the source file. SVG needs a closed <code>path</code>, <code>polygon</code>, <code>rect</code>, <code>circle</code> or <code>ellipse</code>.</dd>
             <dt>"Server: not reachable"</dt>
             <dd>The server has not answered for 90 seconds. On the hosted site the server sleeps after 15 minutes without use and takes about a minute to start; the page keeps trying every 30 seconds and runs a pending Generate once it answers. If it stays unreachable, reload the page. On your own computer, check that the window running <code>opentac cad</code> is still open.</dd>
           </dl>

@@ -2,7 +2,7 @@
 
 Design, build, read and simulate flex-PCB tactile sensors for any robot surface.
 
-OpenTac-CAD turns a drawn outline, a DXF, or a surface of an STL part into a manufacturable
+OpenTac-CAD turns a drawn outline, a DXF or SVG, or a surface of an STL part into a manufacturable
 tactile sensor: a grid of taxels on a flex PCB, wired to a connector, with Gerbers, a printed
 case and a manifest that describes the sensor. The same manifest configures the readout board,
 the simulator and transfer between sensors.
