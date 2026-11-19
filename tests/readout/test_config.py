@@ -138,12 +138,41 @@ def test_a_pitch_that_is_not_whole_micrometres_places_every_row():
     assert sorted(g for g in info["col_geom"] if g != 0xFF) == list(range(9))
 
 
-def test_a_grid_that_is_not_regular_is_still_refused():
-    """The exact pitch does not loosen the check: a column a third of a pitch off
-    the grid is refused, as before."""
+def test_columns_that_are_not_evenly_spaced_set_up_by_order():
+    """A wrap whose faces meet at seams wider than a pitch (the D'Claw and Tesollo
+    boards) is not one regular grid. Setup stores the columns by order at the
+    average spacing, and says so, instead of refusing the board: the board only
+    needs to know which columns neighbour each other, and the viewer draws the
+    manifest's own positions."""
     raw = json.loads((EXAMPLES / "square_9x9_60pin.json").read_text())
     m = json.loads(json.dumps(raw))
-    m["pixels"] = [[x + (1.4 if c == 8 else 0.0), y, r, c] for x, y, r, c in (p[:4] for p in m["pixels"])]
+    m["pixels"] = [[x + (1.5 if c >= 5 else 0.0), y, r, c] for x, y, r, c in (p[:4] for p in m["pixels"])]
+    _, info = device_config(m, "READOUT60")
+    xs = {c: x for x, _, _, c in (p[:4] for p in m["pixels"])}
+    by_x = sorted(xs, key=xs.get)
+    assert [info["col_geom"][c] for c in by_x] == list(range(9))
+    assert info["pitch_x_um"] == round((max(xs.values()) - min(xs.values())) / 8 * 1000)
+    assert info["pitch_y_um"] == 4200
+    assert any("by order" in w for w in info["warnings"])
+
+
+def test_taxels_a_fraction_of_a_micrometre_apart_are_one_column():
+    """Rounding left the Tesollo distal's taxels up to 0.4 um apart within one
+    column, which read as a 0.2 um pitch."""
+    raw = json.loads((EXAMPLES / "square_9x9_60pin.json").read_text())
+    m = json.loads(json.dumps(raw))
+    m["pixels"] = [[x + (0.0002 if r % 2 else -0.0002), y, r, c] for x, y, r, c in (p[:4] for p in m["pixels"])]
+    _, info = device_config(m, "READOUT60")
+    assert (info["pitch_x_um"], info["pitch_y_um"]) == (4200, 4200)
+    assert not any("by order" in w for w in info["warnings"])
+
+
+def test_two_columns_in_one_place_are_still_refused():
+    """Ordering cannot separate two logical columns at the same position."""
+    raw = json.loads((EXAMPLES / "square_9x9_60pin.json").read_text())
+    m = json.loads(json.dumps(raw))
+    x7 = next(p[0] for p in m["pixels"] if p[3] == 7)
+    m["pixels"] = [[x7 if c == 8 else x, y, r, c] for x, y, r, c in (p[:4] for p in m["pixels"])]
     with pytest.raises(ManifestError):
         device_config(m, "READOUT60")
 

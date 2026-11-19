@@ -119,8 +119,8 @@ def pitch_mm(manifest: dict) -> tuple[float, float]:
     """Taxel pitch in mm, x and y, unrounded: the smallest gap between distinct
     coordinates in `pixels` (see derive_pitch_um)."""
     pixels = manifest["pixels"]
-    xs = sorted({round(p[0], 6) for p in pixels})
-    ys = sorted({round(p[1], 6) for p in pixels})
+    xs = _merged(p[0] for p in pixels)
+    ys = _merged(p[1] for p in pixels)
 
     def smallest_step(values, axis):
         if len(values) < 2:
@@ -128,6 +128,21 @@ def pitch_mm(manifest: dict) -> tuple[float, float]:
         return min(b - a for a, b in zip(values, values[1:]))
 
     return smallest_step(xs, "x"), smallest_step(ys, "y")
+
+
+SAME_MM = 1e-3   # coordinates closer than 1 um are one row or column
+
+
+def _merged(values):
+    """Distinct coordinates, ascending, with values closer than SAME_MM taken as one.
+    Rounding in the manifest can leave taxels of one column a fraction of a
+    micrometre apart (0.4 um on the Tesollo distal), which would otherwise read
+    as a pitch of 0.2 um."""
+    out = []
+    for v in sorted({round(v, 6) for v in values}):
+        if not out or v - out[-1] >= SAME_MM:
+            out.append(v)
+    return out
 
 
 def derive_pitch_um(manifest: dict, warnings: list | None = None) -> tuple[int, int]:
@@ -168,7 +183,7 @@ def _fit_line(pairs):
     return (sv - pitch * sk) / n, pitch
 
 
-def derive_geometry(manifest, rows, cols, pitch_x_mm, pitch_y_mm):
+def derive_geometry(manifest, rows, cols, pitch_x_mm, pitch_y_mm, warnings=None, fitted=None):
     """Logical row/col -> grid position (top to bottom, left to right).
 
     From the lattice, not from rank: an empty logical row leaves a real gap, and
@@ -180,14 +195,47 @@ def derive_geometry(manifest, rows, cols, pitch_x_mm, pitch_y_mm):
     insole, 2.3 um short by row 29), so the rebuild is also checked against a
     least-squares fit of the grid, and a grid that fits either within 1 um is
     regular.
+
+    An axis that is not one regular grid (a wrap whose faces meet at seams
+    wider than a pitch: the D'Claw and Tesollo boards) is stored by order
+    instead: consecutive grid positions, left to right or top to bottom, at
+    the average spacing. The board uses these positions only to know which
+    taxels neighbour each other (Xampling); the viewer draws the manifest's own
+    positions. That axis's average spacing goes into `fitted`, and a note into
+    `warnings`.
     """
+    pix = [p[:4] for p in manifest["pixels"]]
     ys, xs = {}, {}
-    for x, y, r, c in (p[:4] for p in manifest["pixels"]):
+    for x, y, r, c in pix:
         ys.setdefault(r, round(y, 6))
         xs.setdefault(c, round(x, 6))
-    origin_x, origin_y = min(xs.values()), max(ys.values())
+    axes = (("row", ys, rows, -pitch_y_mm, 2, 1, max(ys.values())),
+            ("col", xs, cols, pitch_x_mm, 3, 0, min(xs.values())))
+    out = {}
+    for axis, coords, extent, pitch, index, coord, origin in axes:
+        try:
+            out[axis] = _regular_axis(axis, coords, extent, pitch, origin,
+                                      [(p[index], p[coord]) for p in pix])
+        except ManifestError as exc:
+            ordered = _ordered_axis(coords, extent, descending=(axis == "row"))
+            if ordered is None:
+                raise exc
+            geom, step, worst, steps = ordered
+            out[axis] = geom
+            if fitted is not None:
+                fitted[axis] = step
+            if warnings is not None:
+                warnings.append(
+                    f"the {axis}s do not fit one regular grid of {extent} positions (steps "
+                    f"{min(steps):.3f} to {max(steps):.3f} mm), so the board stores them by order at the average "
+                    f"spacing, {step:.3f} mm, up to {worst:.2f} mm from where they are; the "
+                    f"viewer draws the manifest's positions")
+    return out["row"], out["col"]
 
-    def grid_index(value, origin, pitch, axis, index):
+
+def _regular_axis(axis, coords, extent, pitch, origin, pairs_by_logical):
+    """Grid position of each logical row or column on one regular grid, or ManifestError."""
+    def grid_index(value, index):
         steps = (value - origin) / pitch
         nearest = round(steps)
         if abs(steps - nearest) > 0.25:
@@ -196,34 +244,49 @@ def derive_geometry(manifest, rows, cols, pitch_x_mm, pitch_y_mm):
                 f"number: the taxels are not on one regular grid, so the board cannot place them")
         return nearest
 
-    row_geom = [grid_index(ys[r], origin_y, -pitch_y_mm, "row", r) if r in ys else NO_POSITION
-                for r in range(rows)]
-    col_geom = [grid_index(xs[c], origin_x, pitch_x_mm, "col", c) if c in xs else NO_POSITION
-                for c in range(cols)]
-    for axis, geom, extent in (("row", row_geom, rows), ("col", col_geom, cols)):
-        placed = [g for g in geom if g != NO_POSITION]
-        if len(set(placed)) != len(placed):
-            raise ManifestError(f"two logical {axis}s share one grid position")
-        if placed and max(placed) >= extent:
-            raise ManifestError(f"{axis} positions reach {max(placed)} but the grid is only "
-                                f"{extent} {axis}s: pixels span more grid than r/c declares")
+    geom = [grid_index(coords[k], k) if k in coords else NO_POSITION for k in range(extent)]
+    placed = [g for g in geom if g != NO_POSITION]
+    if len(set(placed)) != len(placed):
+        raise ManifestError(f"two logical {axis}s share one grid position")
+    if placed and max(placed) >= extent:
+        raise ManifestError(f"{axis} positions reach {max(placed)} but the grid is only "
+                            f"{extent} {axis}s: pixels span more grid than r/c declares")
 
-    # Each axis must rebuild every pixel within 1 um, from the smallest step or from the fit.
-    pix = [p[:4] for p in manifest["pixels"]]
-    for axis, geom, coord, origin, pitch in (("x", col_geom, 0, origin_x, pitch_x_mm),
-                                             ("y", row_geom, 1, origin_y, -pitch_y_mm)):
-        index = 3 if axis == "x" else 2
-        pairs = [(geom[p[index]], p[coord]) for p in pix]
-        lines = [(origin, pitch)]
-        fit = _fit_line(pairs)
-        if fit is not None:
-            lines.append(fit)
-        worst = [max(abs(o + k * s - v) for k, v in pairs) for o, s in lines]
-        if min(worst) > 1e-3:
-            k = max(range(len(pairs)), key=lambda i: abs(origin + pairs[i][0] * pitch - pairs[i][1]))
-            raise ManifestError(f"grid index and pitch do not reproduce pixels[{k}]: {axis} is "
-                                f"off the grid by {min(worst) * 1000:.1f} um")
-    return row_geom, col_geom
+    # Every pixel within 1 um, from the smallest step or from the fit.
+    pairs = [(geom[k], v) for k, v in pairs_by_logical]
+    lines = [(origin, pitch)]
+    fit = _fit_line(pairs)
+    if fit is not None:
+        lines.append(fit)
+    worst = min(max(abs(o + k * s - v) for k, v in pairs) for o, s in lines)
+    if worst > 1e-3:
+        raise ManifestError(f"grid index and pitch do not reproduce the pixels: the {axis}s are "
+                            f"off one regular grid by {worst * 1000:.1f} um")
+    return geom
+
+
+def _ordered_axis(coords, extent, descending):
+    """(geom, average step, largest offset from it, steps) storing each logical row
+    or column by its place in geometric order; None if two share a position or
+    there are more positions than the grid holds."""
+    values = _merged(coords.values())
+    if len(values) < 2 or len(values) > extent:
+        return None
+    if descending:
+        values = values[::-1]
+    rank = {}
+    for k, v in coords.items():
+        hits = [i for i, u in enumerate(values) if abs(u - v) < SAME_MM]
+        rank[k] = hits[0]
+    if len(set(rank.values())) != len(rank):
+        return None
+    geom = [rank.get(k, NO_POSITION) for k in range(extent)]
+    n = len(values)
+    step = abs(values[-1] - values[0]) / (n - 1)
+    sign = -1.0 if descending else 1.0
+    worst = max(abs(values[i] - (values[0] + sign * i * step)) for i in range(n))
+    steps = [abs(b - a) for a, b in zip(values, values[1:])]
+    return geom, step, worst, steps
 
 
 def extract(manifest: dict, on: Board) -> dict:
@@ -279,7 +342,13 @@ def extract(manifest: dict, on: Board) -> dict:
             f"pad {cp[c]}). This skin was laid out for a different readout board")
 
     pitch_x_um, pitch_y_um = derive_pitch_um(manifest, warnings)
-    row_geom, col_geom = derive_geometry(manifest, rows, cols, *pitch_mm(manifest))
+    fitted = {}
+    row_geom, col_geom = derive_geometry(manifest, rows, cols, *pitch_mm(manifest),
+                                         warnings=warnings, fitted=fitted)
+    if "col" in fitted:
+        pitch_x_um = round(fitted["col"] * 1000.0)
+    if "row" in fitted:
+        pitch_y_um = round(fitted["row"] * 1000.0)
 
     shear = manifest.get("shear")
     shear_groups = None
