@@ -179,7 +179,7 @@ def _bitwidth(n):
 # structure extraction
 # --------------------------------------------------------------------------
 
-def analyze(manifest):
+def analyze(manifest, by_order=False):
     """Recover the latent grid structure the manifest states by enumeration.
 
     The manifest gives per-taxel [x, y, row, col]. The format relies on the
@@ -220,6 +220,28 @@ def analyze(manifest):
     rank = {i: ys.index(row_y[i]) for i in row_y}
     perm = [rank.get(i, 0) for i in range(manifest["r"])]
 
+    if by_order:
+        return _by_order(manifest, col_x, ys, xs, pitch_y, pitch_x, ky, kx, perm)
+
+    x0, kx = _exact_columns(manifest, col_x, xs, pitch_x, kx)
+    return {
+        "r": manifest["r"], "c": manifest["c"],
+        "x0": x0, "y0": ys[0],
+        "pitch_x": pitch_x, "pitch_y": pitch_y,
+        "w": manifest["w"], "h": manifest["h"],
+        "footprint": manifest.get("footprint") or dict(FP_DEFAULT),
+        "rp0": (manifest.get("rp") or [0])[0],
+        "perm": perm,
+        "ky": ky, "kx": kx,
+        "n_lat_y": max(ky) + 1, "n_lat_x": max(kx) + 1,
+        "mask": list(manifest["m"]),
+        "colperm": None,
+    }
+
+
+def _exact_columns(manifest, col_x, xs, pitch_x, kx):
+    """(x0, kx): the column table on the regular lattice, one entry per manifest
+    column, or TaxelCoreError."""
     # The decoder looks each column up by its manifest index (kx[ci] in
     # taxels()), so the occupied columns, taken in index order, must run left
     # to right. A board whose pad block reverses its columns cannot be
@@ -247,10 +269,67 @@ def analyze(manifest):
             full.append(k)
         kx = full
         x0 = round(xs[0] - lead * pitch_x, 4)
+    return x0, kx
 
+
+def _even_spacing(xs):
+    """(pitch, origin) putting position k at origin + k * pitch with the smallest
+    largest offset from xs, over the values the core stores (1/Q mm), so the
+    offset reported is the one a decoder gets."""
+    n = len(xs)
+    if n < 2:
+        return 0.0, round(xs[0] * Q) / Q
+    mean = (xs[-1] - xs[0]) / (n - 1)
+    best = None
+    for step in range(max(1, int(mean * Q * 0.5)), int(mean * Q * 1.5) + 2):
+        pitch = step / Q
+        res = [x - k * pitch for k, x in enumerate(xs)]
+        origin = round((max(res) + min(res)) / 2.0 * Q) / Q
+        worst = max(abs(r - origin) for r in res)
+        if best is None or worst < best[0] - 1e-12:
+            best = (worst, pitch, origin)
+    return best[1], best[2]
+
+
+def _by_order(manifest, col_x, ys, xs, pitch_y, pitch_x, ky, kx, perm):
+    """The grid for a board the regular lattice does not describe: a wrap whose
+    faces meet at seams wider than a pitch, or a pad block that numbers its
+    columns right to left. Each axis stays on its lattice where that places
+    every row or column within 1 um; otherwise its rows or columns take the
+    slots of their rank, in order, at the even spacing that keeps the largest
+    offset smallest (_even_spacing). Positions are then approximate, the order
+    exact (see check_ordered()). Rows already carry their order (perm); where
+    the column ranks are not the column numbers, the core carries them as a
+    column-order table, which the reserved header bit announces. A column with
+    no active taxel takes a slot after the occupied ones; the mask marks it
+    empty."""
+    c = manifest["c"]
+    y0 = ys[0]
+    if any(abs(v - (ys[0] - k * pitch_y)) > 1e-3 for v, k in zip(ys, ky)):
+        pitch_y, origin = _even_spacing([-v for v in ys])
+        y0, ky = -origin, list(range(len(ys)))
+
+    colperm = None
+    try:
+        x0, kx = _exact_columns(manifest, col_x, xs, pitch_x, kx)
+        if any(abs(col_x[ci] - (x0 + kx[ci] * pitch_x)) > 1e-3 for ci in col_x):
+            raise TaxelCoreError("columns are not on one lattice")
+    except TaxelCoreError:
+        occ = sorted(col_x, key=lambda i: (col_x[i], i))
+        xs_occ = [col_x[i] for i in occ]
+        if any(b - a < 1e-3 for a, b in zip(xs_occ, xs_occ[1:])):
+            raise TaxelCoreError("two columns share one position, so their order is not defined")
+        rank = {ci: k for k, ci in enumerate(occ)}
+        for ci in range(c):
+            if ci not in rank:
+                rank[ci] = len(rank)
+        pitch_x, x0 = _even_spacing(xs_occ)
+        kx = list(range(c))
+        table = [rank[ci] for ci in range(c)]
+        colperm = None if table == list(range(c)) else table
     return {
-        "r": manifest["r"], "c": manifest["c"],
-        "x0": x0, "y0": ys[0],
+        "r": manifest["r"], "c": c,
+        "x0": x0, "y0": y0,
         "pitch_x": pitch_x, "pitch_y": pitch_y,
         "w": manifest["w"], "h": manifest["h"],
         "footprint": manifest.get("footprint") or dict(FP_DEFAULT),
@@ -259,6 +338,7 @@ def analyze(manifest):
         "ky": ky, "kx": kx,
         "n_lat_y": max(ky) + 1, "n_lat_x": max(kx) + 1,
         "mask": list(manifest["m"]),
+        "colperm": colperm,
     }
 
 
@@ -266,9 +346,10 @@ def analyze(manifest):
 # encode / decode
 # --------------------------------------------------------------------------
 
-def encode(manifest, pad_pitch_05=True):
-    """manifest dict -> taxel core bytes."""
-    g = analyze(manifest)
+def encode(manifest, pad_pitch_05=True, by_order=False):
+    """manifest dict -> taxel core bytes. by_order: lay out by order the rows or
+    columns the regular grid cannot describe (see _by_order)."""
+    g = analyze(manifest, by_order=by_order)
     r, c = g["r"], g["c"]
 
     square = (g["pitch_x"] == g["pitch_y"]) and (g["w"] == g["h"])
@@ -284,7 +365,7 @@ def encode(manifest, pad_pitch_05=True):
     w.u(1 if fp_default else 0, 1)
     w.u(1 if sparse_x else 0, 1)
     w.u(1 if sparse_y else 0, 1)
-    w.u(0, 1)                            # reserved, always 0
+    w.u(1 if g.get("colperm") else 0, 1)  # a column-order table follows the mask
     w.u(1 if pad_pitch_05 else 0, 1)     # which FPC connector mates
     if not (0 < r < 64 and 0 < c < 64):
         raise TaxelCoreError("grid %dx%d exceeds the 63x63 this format encodes" % (r, c))
@@ -326,6 +407,10 @@ def encode(manifest, pad_pitch_05=True):
         w.u(rank, nb)
 
     _write_mask(w, g["mask"], r, c)
+    if g.get("colperm"):
+        nb = _bitwidth(c)
+        for k in g["colperm"]:
+            w.u(k, nb)
     body = w.bytes()
     return body + bytes([crc8(body)])
 
@@ -376,7 +461,7 @@ def decode(data):
     fp_default = b.u(1)
     sparse_x = b.u(1)
     sparse_y = b.u(1)
-    b.u(1)                               # reserved, ignored
+    has_colperm = b.u(1)                 # a column-order table follows the mask
     pad_pitch_05 = b.u(1)
     r = b.u(6)
     c = b.u(6)
@@ -413,6 +498,19 @@ def decode(data):
 
     mask = _read_mask(b, r, c)
 
+    # The column-order table. The same header bit was a flag on early boards
+    # (anchor holes, never shipped), so it counts only if a whole permutation
+    # of the columns follows; the zero padding of a board without one is not.
+    colperm = None
+    if has_colperm:
+        try:
+            nb = _bitwidth(c)
+            table = [b.u(nb) for _ in range(c)]
+            if sorted(table) == list(range(c)):
+                colperm = table
+        except ValueError:
+            pass
+
     return {
         "r": r, "c": c, "x0": x0, "y0": y0,
         "pitch_x": pitch_x, "pitch_y": pitch_y,
@@ -422,6 +520,7 @@ def decode(data):
         "cp": list(range(rp0 + r, rp0 + r + c)),
         "pad_pitch_mm": 0.5 if pad_pitch_05 else None,
         "perm": perm, "kx": kx, "ky": ky,
+        "colperm": colperm,
         "m": mask,
     }
 
@@ -455,7 +554,8 @@ def taxels(core):
         for ci in range(core["c"]):
             if core["m"][ri][ci] != "1":
                 continue
-            x = core["x0"] + core["kx"][ci] * core["pitch_x"]
+            slot = core["colperm"][ci] if core.get("colperm") else ci
+            x = core["x0"] + core["kx"][slot] * core["pitch_x"]
             y = core["y0"] - core["ky"][core["perm"][ri]] * core["pitch_y"]
             out.append((round(x, 4), round(y, 4), ri, ci, core["rp"][ri], core["cp"][ci]))
     return out
@@ -487,6 +587,32 @@ def check(manifest):
         raise TaxelCoreError("%d of %d taxels would decode to the wrong place"
                              % (bad, len(want)))
     return core
+
+
+def check_ordered(manifest):
+    """(core, worst row offset, worst column offset), in mm, for the grid laid out
+    by order (_by_order), or TaxelCoreError. Every taxel must come back, rows and
+    columns in their true order, each within half of the smallest gap between
+    its neighbours on that axis."""
+    try:
+        core = decode(encode(manifest, by_order=True))
+        got = {(t[2], t[3]): t[:2] for t in taxels(core)}
+    except TaxelCoreError:
+        raise
+    except (ValueError, IndexError) as exc:
+        raise TaxelCoreError("the code does not decode: %s" % exc)
+    want = {(p[2], p[3]): p[:2] for p in manifest["pixels"]}
+    if set(got) != set(want):
+        raise TaxelCoreError("the code would describe a different set of taxels")
+    worst = []
+    for axis, i in (("rows", 1), ("columns", 0)):
+        vals = sorted({round(v[i], 3) for v in want.values()})
+        gap = min((b - a for a, b in zip(vals, vals[1:])), default=float("inf"))
+        off = max(abs(want[k][i] - got[k][i]) for k in want)
+        if off >= gap / 2.0:
+            raise TaxelCoreError("%s spread evenly would be %.2f mm from their positions" % (axis, off))
+        worst.append(off)
+    return core, worst[0], worst[1]
 
 
 # --------------------------------------------------------------------------

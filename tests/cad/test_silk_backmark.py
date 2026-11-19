@@ -472,10 +472,17 @@ def test_qr_decodes_when_a_column_has_no_active_taxel(where):
     assert worst <= 0.01
 
 
-def test_qr_is_left_off_rather_than_misplacing_taxels():
-    """Columns whose pads run right to left, or columns that are not evenly spaced,
-    are boards the taxel core cannot describe. The mark leaves the QR off and says
-    so, instead of printing a code that decodes to the wrong sensor."""
+def _decoded(mark):
+    core = decode(b41decode(mark["qr"]["payload"]))
+    return core, {(r, c): (x, y) for x, y, r, c, _, _ in taxels(core)}
+
+
+def test_wrap_boards_get_a_qr_with_their_columns_in_order():
+    """Columns that are not evenly spaced (a wrap's seams) or are numbered right to
+    left (a pad block that reverses them) do not fit the regular grid. The QR then
+    spaces the columns evenly in their true order, with a column-order table when
+    the numbering needs one, and the mark says how far columns move. Rows stay
+    exact."""
     manifest_json, _ = _manifest(SQUARE, "expand", 2.0, 2.2)
     m = json.loads(manifest_json)
     c = m["c"]
@@ -483,13 +490,72 @@ def test_qr_is_left_off_rather_than_misplacing_taxels():
     reversed_cols = json.loads(manifest_json)
     reversed_cols["pixels"] = [[x, y, r, c - 1 - ci] for x, y, r, ci in m["pixels"]]
     reversed_cols["m"] = [row[::-1] for row in m["m"]]
-    reversed_cols["cp"] = m["cp"][::-1]
 
     uneven = json.loads(manifest_json)
     uneven["pixels"] = [[x + (0.7 if ci >= c // 2 else 0.0), y, r, ci] for x, y, r, ci in m["pixels"]]
 
-    for tag, case in (("reversed columns", reversed_cols), ("uneven columns", uneven)):
+    for tag, case, table in (("reversed columns", reversed_cols, True), ("uneven columns", uneven, False)):
         mark = backmark(json.dumps(case))
-        assert mark["qr"] is None, tag
-        assert any(w.startswith("taxel-core QR omitted") for w in mark["warnings"]), (tag, mark["warnings"])
-        assert mark["rects"], "%s: the registration grid should still be drawn" % tag
+        assert mark["qr"], (tag, mark["warnings"])
+        assert any("spaces the columns evenly" in w for w in mark["warnings"]), tag
+        core, got = _decoded(mark)
+        assert (core["colperm"] is not None) == table, tag
+        want = {(r, ci): (x, y) for x, y, r, ci in case["pixels"]}
+        assert set(got) == set(want), tag
+        assert max(abs(got[k][1] - want[k][1]) for k in want) <= 0.01, tag      # rows exact
+        for r in {k[0] for k in want}:                                          # column order exact
+            ks = [k for k in want if k[0] == r]
+            assert sorted(ks, key=lambda k: want[k][0]) == sorted(ks, key=lambda k: got[k][0]), tag
+        assert max(abs(got[k][0] - want[k][0]) for k in want) < 1.1, tag      # under half a 2.2 mm gap
+
+
+def test_qr_is_left_off_when_two_columns_share_a_position():
+    """Ordering cannot separate two columns at one x; the mark leaves the QR off
+    and says so rather than print a code that decodes to the wrong sensor."""
+    manifest_json, _ = _manifest(SQUARE, "expand", 2.0, 2.2)
+    m = json.loads(manifest_json)
+    x1 = next(x for x, _, _, ci in m["pixels"] if ci == 1)
+    m["pixels"] = [[x1 if ci == 2 else x, y, r, ci] for x, y, r, ci in m["pixels"]]
+    mark = backmark(json.dumps(m))
+    assert mark["qr"] is None
+    assert any(w.startswith("taxel-core QR omitted") for w in mark["warnings"])
+    assert mark["rects"], "the registration grid should still be drawn"
+
+
+def test_an_early_boards_header_flag_is_not_read_as_a_column_order():
+    """The column-order bit was the anchor-holes flag on early boards (never
+    shipped). A code with the bit set but no table after the mask decodes as
+    before."""
+    from opentac.cad.export.taxel_core import crc8, encode
+    manifest_json, _ = _manifest(SQUARE, "expand", 2.0, 2.2)
+    m = json.loads(manifest_json)
+    plain = encode(m)
+    body = bytearray(plain[:-1])
+    body[0] |= 0x02                     # the bit after version, square, footprint, sparse x, sparse y
+    flagged = bytes(body) + bytes([crc8(bytes(body))])
+    a, b = decode(plain), decode(flagged)
+    assert b["colperm"] is None
+    assert taxels(a) == taxels(b)
+
+
+def test_a_board_wrapped_the_other_way_gets_its_rows_in_order():
+    """Seams across the rows (the Tesollo proximal) leave the rows unevenly spaced.
+    The QR spaces the rows evenly in their true order; the row table already
+    carries their order, so no column-order table is needed, and the columns
+    stay exact."""
+    manifest_json, _ = _manifest(SQUARE, "expand", 2.0, 2.2)
+    m = json.loads(manifest_json)
+    ys = sorted({y for _, y, _, _ in m["pixels"]})
+    cut = ys[len(ys) // 2]
+    m["pixels"] = [[x, y + (0.7 if y >= cut else 0.0), r, ci] for x, y, r, ci in m["pixels"]]
+    mark = backmark(json.dumps(m))
+    assert mark["qr"], mark["warnings"]
+    assert any("spaces the rows evenly" in w for w in mark["warnings"])
+    core, got = _decoded(mark)
+    assert core["colperm"] is None
+    want = {(r, ci): (x, y) for x, y, r, ci in m["pixels"]}
+    assert max(abs(got[k][0] - want[k][0]) for k in want) <= 0.01                 # columns exact
+    for ci in {k[1] for k in want}:                                               # row order exact
+        ks = [k for k in want if k[1] == ci]
+        assert sorted(ks, key=lambda k: want[k][1]) == sorted(ks, key=lambda k: got[k][1])
+    assert max(abs(got[k][1] - want[k][1]) for k in want) < 1.1

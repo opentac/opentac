@@ -9,7 +9,9 @@ design (docs/designs/files/*.zip) and every OpenTac-CAD manifest in
 examples/manifests/, this encodes the taxel core and decodes it both ways, as
 the bare payload and as the printed link in the forms a scanner or a person can
 hand over (upper and lower case, with and without https://, '*' or '/', the
-decoder-page address), and requires byte-identical output. It also feeds both
+decoder-page address), and requires byte-identical output. Each board is also
+checked with its column numbers reversed, which the core encodes with a
+column-order table. It also feeds both
 sides random one-character corruptions and requires them to refuse the same
 ones, and compares the JS port of Python's float formatting and round() on
 values chosen to hit their edge cases.
@@ -162,6 +164,18 @@ def main() -> int:
         cases += [(name, t) for t in texts_for(payload, rng)]
         boards.append((name, payload))
         payload_of[name] = payload
+    # The same boards with their column numbers reversed, encoded by order
+    # (taxel_core._by_order): the core then carries a column-order table,
+    # which both decoders must read the same way.
+    for name, man in list(sources()):
+        rev = json.loads(json.dumps(man))
+        c = rev["c"]
+        rev["pixels"] = [[p[0], p[1], p[2], c - 1 - p[3]] + list(p[4:]) for p in man["pixels"]]
+        rev["m"] = [row[::-1] for row in man["m"]]
+        payload = b41encode(encode(rev, by_order=True))
+        tag = name + " (columns reversed)"
+        cases += [(tag, t) for t in texts_for(payload, rng)]
+        boards.append((tag, payload))
     floats, rounds = edge_floats(rng), round_cases(rng)
     examples = example_links()
 

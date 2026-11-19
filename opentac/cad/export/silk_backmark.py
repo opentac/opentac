@@ -20,9 +20,10 @@ longer than the payload, which usually costs one QR version, 1.4 mm a side
 per version. A board too small for it gets the bare payload,
 which a phone shows as text for the decoder page or `opentac manifest
 from-qr`; a board too small for that gets no QR. The code is decoded and
-checked against the manifest before it is printed; a board it cannot
-describe (columns out of order, unevenly spaced columns) gets no QR and a
-warning.
+checked against the manifest before it is printed. A board the regular grid
+cannot describe (unevenly spaced columns, columns numbered out of order) gets
+its columns laid out by order, approximately spaced, with a warning; a board
+that cannot be described even so gets no QR and a warning.
 
 The grid carries the board's shape, by making the photograph measurable. The
 outline is deliberately not in the QR (it is 80-95% of the payload, and the
@@ -89,7 +90,7 @@ from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import polylabel
 
 from opentac.cad.export.taxel_core import (
-    TaxelCoreError, b41encode, check as check_core, encode as encode_core, qr_link)
+    TaxelCoreError, b41encode, check as check_core, check_ordered, encode as encode_core, qr_link)
 
 # Geometry, all mm. See the sizing note above before changing MODULE_MM.
 MODULE_MM = 0.35
@@ -202,15 +203,16 @@ def _ink_runs(dark, precomp_modules):
     return out
 
 
-def _qr_text(manifest, form):
+def _qr_text(manifest, form, ordered=False):
     """(blob, payload, text): the taxel core, its base41 payload, and what a
-    QR of this form prints."""
-    blob = encode_core(manifest)
+    QR of this form prints. ordered: columns laid out by order (see
+    taxel_core._by_order)."""
+    blob = encode_core(manifest, by_order=ordered)
     payload = b41encode(blob)
     return blob, payload, (qr_link(payload) if form == "link" else payload)
 
 
-def qr_rects(manifest, center, form="link"):
+def qr_rects(manifest, center, form="link", ordered=False):
     """QR ink rectangles in board coords (y-up), pre-mirrored in X.
 
     `form` is "link" or "bare" (QR_FORMS). Returns (rects, info) where info
@@ -218,7 +220,7 @@ def qr_rects(manifest, center, form="link"):
     report what it placed.
     """
     try:
-        blob, payload, text = _qr_text(manifest, form)
+        blob, payload, text = _qr_text(manifest, form, ordered)
         dark, version = _qr_matrix(text)
     except Exception:
         return [], None
@@ -466,10 +468,10 @@ def _qr_center(edge_cuts, tcx, tcy, size):
     return (pole.x, pole.y)
 
 
-def _qr_size_mm(manifest, form="link"):
+def _qr_size_mm(manifest, form="link", ordered=False):
     """Printed side of the QR, quiet zone included, without building artwork."""
     try:
-        dark, _ = _qr_matrix(_qr_text(manifest, form)[2])
+        dark, _ = _qr_matrix(_qr_text(manifest, form, ordered)[2])
     except Exception:
         return None
     return None if dark is None else dark.shape[0] * MODULE_MM
@@ -526,28 +528,40 @@ def _backmark(manifest_json, enable=True):
     inner = _inset(edge_cuts, 0.0)
     qr, info, center, missed = [], None, None, []
     # A QR that decodes to the wrong sensor is worse than none, so the code is
-    # decoded and checked against the manifest before anything is printed.
+    # decoded and checked against the manifest before anything is printed. A
+    # board the regular grid cannot describe (a wrap's seams, columns numbered
+    # out of order) gets its columns laid out by order: their order is exact,
+    # their positions approximate, and the mark says by how much.
+    ordered, notes = False, []
     try:
         check_core(manifest)
         forms = QR_FORMS
     except TaxelCoreError as exc:
-        forms = ()
-        omitted = "taxel-core QR omitted: %s; registration grid kept" % exc
+        try:
+            _, off_rows, off_cols = check_ordered(manifest)
+            forms, ordered = QR_FORMS, True
+            moved = [axis for axis, off in (("rows", off_rows), ("columns", off_cols)) if off > 0.011]
+            notes.append("the taxel-core QR spaces the %s evenly, in their true order: decoded "
+                         "taxels are up to %.2f mm from their positions in the manifest"
+                         % (" and ".join(moved) or "columns", max(off_rows, off_cols)))
+        except TaxelCoreError:
+            forms = ()
+            notes.append("taxel-core QR omitted: %s; registration grid kept" % exc)
     for form in forms:
-        size = _qr_size_mm(manifest, form)
+        size = _qr_size_mm(manifest, form, ordered)
         if size is None:
             break                # no segno, or a grid the format cannot hold
         at = _qr_center(edge_cuts, tcx, tcy, size)
         half = size / 2.0
         if inner is not None and inner.contains(
                 box(at[0] - half, at[1] - half, at[0] + half, at[1] + half)):
-            qr, info = qr_rects(manifest, at, form)
+            qr, info = qr_rects(manifest, at, form, ordered)
             center = at if info else None
             break
         missed.append((form, size))
 
     keep = []
-    warnings = [] if forms else [omitted]
+    warnings = list(notes)
     strokes, dim_bb = [], None
     if info:
         half = info["size_mm"] / 2.0 + QR_CLEAR_MM
