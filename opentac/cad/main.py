@@ -703,6 +703,19 @@ def _fixed_keepout_attempt_params(params: Params) -> list[Params]:
     ]
 
 
+def _shares_a_line(layout) -> bool:
+    """Whether two logical rows sit on one row of taxels, or two logical columns
+    on one column. Split nets do this where a notch or slit cuts a row in two;
+    the readout stores one grid position per logical row and column, so
+    `opentac setup` cannot place such a board."""
+    rows, cols = {}, {}
+    for (x, y), r, c in zip(np.asarray(layout.placements_xy, dtype=float),
+                            layout.row_net_per_pixel, layout.col_net_per_pixel):
+        rows.setdefault(round(float(y), 3), set()).add(r)
+        cols.setdefault(round(float(x), 3), set()).add(c)
+    return any(len(v) > 1 for v in rows.values()) or any(len(v) > 1 for v in cols.values())
+
+
 def _drc_crowding(col_routes: list[Route], row_routes: list[Route], params: Params):
     """Trace-to-trace DRC failures, as (point, shortfall_mm) pairs.
 
@@ -2281,11 +2294,13 @@ def generate(req: GenerateRequest):
                         or len(near_miss[0][0].placements_xy) > len(layout.placements_xy)):
                     (layout, col_routes, row_routes, hug_plan, incomplete), keepout_profile, keepout_info = near_miss
                     routing_problem_pix, escapes, worst_escape = set(), [], 0.0
-                # Score this attempt. Fewest real defects wins; among equally
-                # clean results, the denser one. See _fixed_keepout_attempt_params.
+                # Score this attempt. Fewest real defects wins; then a board the
+                # readout can read (split nets put two logical rows on one row of
+                # taxels, which `opentac setup` refuses); then the denser one.
+                # See _fixed_keepout_attempt_params.
                 defects = (len(routing_problem_pix) + len(escapes)
                            + len(_drc_crowding(col_routes, row_routes, params)))
-                score = (defects, -len(layout.placements_xy))
+                score = (defects, int(_shares_a_line(layout)), -len(layout.placements_xy))
                 snapshot = (score, params, layout, keepout_profile, keepout_info,
                             col_routes, row_routes, removed, routing_problem_pix,
                             escapes, incomplete, worst_escape, attempt, join_nets,

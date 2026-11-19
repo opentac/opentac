@@ -44,6 +44,8 @@ def drc_check(
         violations.extend(_check_board_edge(col_routes, outline_xy, edge_min, "F.Cu", board_poly))
         for layer, routes in _by_layer(row_routes, "B.Cu"):
             violations.extend(_check_board_edge(routes, outline_xy, edge_min, layer, board_poly))
+    if taxels is not None and (outline_xy is not None or board_poly is not None):
+        violations.extend(_check_taxels_inside(taxels, outline_xy, board_poly))
     if vias:
         violations.extend(_check_vias(
             vias, [*col_routes, *row_routes], trace_w_mm, clearance_mm,
@@ -125,6 +127,26 @@ class TaxelCopper:
     def of(cls, layout, removed, params):
         return cls(layout.placements_xy, layout.col_net_per_pixel, set(removed or ()),
                    params.pixel_w_mm, params.pixel_h_mm, params.edge_clear_mm)
+
+
+def _check_taxels_inside(taxels: TaxelCopper, outline_xy=None, board_poly=None) -> list[DrcViolation]:
+    """Each taxel's copper must lie inside the board. Packing keeps whole taxels
+    inside a fixed outline; this catches any layout where a slot, slit or notch
+    in the final board still cuts through a taxel."""
+    from shapely.prepared import prep
+    board = board_poly if board_poly is not None else Polygon(outline_xy)
+    if board is None or board.is_empty:
+        return []
+    inside = prep(board.buffer(1e-6))
+    out = []
+    for net, b in taxels.items:
+        if not inside.covers(b):
+            c = np.array(b.centroid.coords[0])
+            out.append(DrcViolation(
+                layer="F.Cu", net1=f"TAXEL:{net}", net2="board edge", type="taxel_outside_board",
+                seg1=np.array([c, c]), seg2=np.array([c, c]),
+                distance=-float(b.difference(board).area), min_required=0.0))
+    return out
 
 
 def _check_taxels(col_routes: list[Route], taxels: TaxelCopper, need: float) -> list[DrcViolation]:

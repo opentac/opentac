@@ -272,6 +272,7 @@ def layout_with_connector(
     pack_anchor: str = "top_right",
     join_split_nets: bool = False,
     placements_override: np.ndarray = None,
+    whole_within_xy: np.ndarray = None,
 ) -> Layout:
     """Full layout: pack pixels, assign nets, select connector, build geometry.
 
@@ -303,6 +304,7 @@ def layout_with_connector(
             params.pitch_x_mm, params.pitch_y_mm,
             params.edge_keepout_mm,
             anchor=pack_anchor,
+            whole_within_xy=whole_within_xy,
         )
 
     if len(placements_xy) == 0:
@@ -421,7 +423,7 @@ def max_pack_count(outline_xy: np.ndarray, params: Params, fill_xy: np.ndarray =
     placements, _ = pack_pixels_in_polygon(
         pack_xy, params.pixel_w_mm, params.pixel_h_mm,
         params.pitch_x_mm, params.pitch_y_mm, params.edge_keepout_mm,
-        anchor="top_center")
+        anchor="top_center", whole_within_xy=outline_xy)
     return len(placements)
 
 
@@ -494,7 +496,8 @@ def layout_fixed_shape_keepout(
                 raise ValueError(_TOO_SMALL_MSG)
 
             try:
-                layout = layout_with_connector(outline_xy, params, region_xy, pack_anchor="top_center")
+                layout = layout_with_connector(outline_xy, params, region_xy, pack_anchor="top_center",
+                                               whole_within_xy=outline_xy)
             except ValueError as exc:
                 # A region can survive the carve geometrically and still be too
                 # small for a single pixel. Report that as the keep-out mode's own
@@ -607,7 +610,7 @@ def _largest_grid_component(placements, params):
     return np.array([biggest.covers(Point(x, y)) for x, y in placements])
 
 
-def _best_phase_placements(region_xy, params) -> np.ndarray | None:
+def _best_phase_placements(region_xy, params, board_xy=None) -> np.ndarray | None:
     """Pack the carved region at several lattice phases, keep the densest
     connected grid. Returns pixel centers (largest component only), or None."""
     best = None
@@ -618,7 +621,8 @@ def _best_phase_placements(region_xy, params) -> np.ndarray | None:
             placements, _ = pack_pixels_in_polygon(
                 region_xy, params.pixel_w_mm, params.pixel_h_mm,
                 params.pitch_x_mm, params.pitch_y_mm,
-                params.edge_keepout_mm, anchor="top_center", phase=phase)
+                params.edge_keepout_mm, anchor="top_center", phase=phase,
+                whole_within_xy=board_xy)
             if len(placements) == 0:
                 continue
             keep = _largest_grid_component(placements, params)
@@ -690,7 +694,7 @@ def layout_fixed_hug_keepout(
     if region_xy is None:
         raise ValueError(_TOO_SMALL_MSG)
 
-    placements = _best_phase_placements(region_xy, params)
+    placements = _best_phase_placements(region_xy, params, board_xy=outline_xy)
     if placements is None:
         raise ValueError(_TOO_SMALL_MSG)
     try:

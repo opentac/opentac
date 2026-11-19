@@ -13,6 +13,7 @@ def pack_pixels_in_polygon(
     edge_keepout_mm: float,
     anchor: str = "top_right",
     phase: tuple = (0.0, 0.0),
+    whole_within_xy: np.ndarray = None,
 ) -> tuple[np.ndarray, object]:
     """Place rectangular pixels inside a polygon on a rectangular grid.
 
@@ -89,12 +90,27 @@ def pack_pixels_in_polygon(
         [-dx,  dy],
     ])
 
+    # whole_within_xy (the fixed-outline modes pass the board outline): a taxel
+    # also needs its whole square inside that outline, less the edge keep-out,
+    # not only its corners. A slot or slit narrower than a taxel passes between
+    # the corners and would cut through its copper and the grid wires beside
+    # it. Grow mode builds a larger board around the drawn outline, which
+    # closes a narrow slit, so it keeps the corner test alone.
+    from shapely.geometry import box
+    from shapely.prepared import prep
+    whole = None
+    if whole_within_xy is not None:
+        board = make_polygon(whole_within_xy)
+        if edge_keepout_mm > 0:
+            board = polygon_buffer(board, -edge_keepout_mm)
+        whole = prep(board.buffer(1e-9))
+
     placed = []
     for cy in y_centers:
         for cx in x_centers:
             corners = corner_offsets + np.array([cx, cy])
             ok = inside_or_on_polygon(inner_poly, corners[:, 0], corners[:, 1])
-            if np.all(ok):
+            if np.all(ok) and (whole is None or whole.covers(box(cx - dx, cy - dy, cx + dx, cy + dy))):
                 placed.append([cx, cy])
 
     if placed:
