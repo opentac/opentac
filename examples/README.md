@@ -20,6 +20,14 @@ uv run opentac setup my_design.zip
 
 Without a board they print one line saying what is missing and exit.
 
+A take folder from `record_take.py` or `opentac record` / `opentac view --save` can be
+opened later with no board:
+
+```sh
+uv run opentac replay recordings/<take>                 # heatmap playback
+uv run opentac replay recordings/<take> --snapshot a.png
+```
+
 ## Data
 
 | Folder | Contents |
